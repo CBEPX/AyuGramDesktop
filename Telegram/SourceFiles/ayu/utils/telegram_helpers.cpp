@@ -725,6 +725,9 @@ bool isMessageSavable(const not_null<HistoryItem*> item) {
 }
 
 void processMessageDelete(not_null<HistoryItem*> item) {
+	if (item->isDeleted()) {
+		return;
+	}
 	if (!isMessageSavable(item)) {
 		item->history()->owner().notifyItemsAboutToBeDestroyed({ item });
 		item->destroy();

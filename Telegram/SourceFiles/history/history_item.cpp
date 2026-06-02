@@ -3931,6 +3931,9 @@ void HistoryItem::setPostAuthor(const QString &postAuthor) {
 }
 
 void HistoryItem::setDeleted() {
+	if (isDeleted()) {
+		return;
+	}
 	_deleted = true;
 	_deletedAnimated = true;
 
@@ -3949,6 +3952,8 @@ void HistoryItem::setDeleted() {
 			sublist->unreadReactions().erase(id);
 		}
 	}
+
+	removeFromSharedMediaIndex();
 
 	if (isService()) {
 		const auto &settings = AyuSettings::getInstance();
