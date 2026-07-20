@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - verify/pr-431-9b48825b
+      - verify/pr-431-macos-arm64-retry
+      - verify/pr-431-windows-x64-retry
       - verify/pr-431-432-e0a6d980
 
 permissions:
@@ -24,7 +26,11 @@ jobs:
         include: >-
           ${{ fromJSON(
             github.ref_name == 'verify/pr-431-9b48825b' &&
-            '[{"name":"PR 431 macOS ARM64 Release","runner":"macos-15","platform":"macos","candidate":"pr431","artifact":"pr431-macos-arm64-release-9b48825b","expected_source":"9b48825b032cc7dec37fa38041835f38bf7f2641","expected_tree":"60f367233e9a3cc5c36bf871f7ae071c62fa6a21"},{"name":"PR 431 Windows x64 Release","runner":"windows-2025","platform":"windows","candidate":"pr431","artifact":"pr431-windows-x64-release-9b48825b","expected_source":"9b48825b032cc7dec37fa38041835f38bf7f2641","expected_tree":"60f367233e9a3cc5c36bf871f7ae071c62fa6a21"}]' ||
+            '[{"name":"PR 431 macOS ARM64 Release","runner":"macos-15","platform":"macos","candidate":"pr431","artifact":"pr431-macos-arm64-release-9b48825b","expected_source":"9b48825b032cc7dec37fa38041835f38bf7f2641","expected_tree":"60f367233e9a3cc5c36bf871f7ae071c62fa6a21"},{"name":"PR 431 Windows x64 Release","runner":"windows-2022","platform":"windows","candidate":"pr431","artifact":"pr431-windows-x64-release-9b48825b","expected_source":"9b48825b032cc7dec37fa38041835f38bf7f2641","expected_tree":"60f367233e9a3cc5c36bf871f7ae071c62fa6a21"}]' ||
+            github.ref_name == 'verify/pr-431-windows-x64-retry' &&
+            '[{"name":"PR 431 Windows x64 Release retry","runner":"windows-2022","platform":"windows","candidate":"pr431","artifact":"pr431-windows-x64-release-9b48825b","expected_source":"9b48825b032cc7dec37fa38041835f38bf7f2641","expected_tree":"60f367233e9a3cc5c36bf871f7ae071c62fa6a21"}]' ||
+            github.ref_name == 'verify/pr-431-macos-arm64-retry' &&
+            '[{"name":"PR 431 macOS ARM64 Release retry","runner":"macos-15","platform":"macos","candidate":"pr431","artifact":"pr431-macos-arm64-release-9b48825b","expected_source":"9b48825b032cc7dec37fa38041835f38bf7f2641","expected_tree":"60f367233e9a3cc5c36bf871f7ae071c62fa6a21"}]' ||
             '[{"name":"PR 431+432 macOS ARM64 Release","runner":"macos-15","platform":"macos","candidate":"pr431-pr432","artifact":"pr431-pr432-macos-arm64-release-e0a6d980","expected_source":"synthetic","expected_tree":"e0a6d98095c50f9170868c32312f2b81cfe95b39"}]'
           ) }}
     env:
@@ -73,7 +79,7 @@ jobs:
       - name: Checkout verification commit
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
-          fetch-depth: 3
+          fetch-depth: 32
           path: TBuild/source
           persist-credentials: false
           submodules: false
@@ -162,6 +168,53 @@ jobs:
           nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
           nuget sources Add -Source https://api.nuget.org/v3/index.json & exit 0
 
+      - name: Prepare pinned Windows dependency patches
+        if: matrix.platform == 'windows'
+        shell: cmd
+        run: |
+          cd /d %TBUILD%
+          call %TBUILD%\source\Telegram\build\prepare\win.bat silent patches
+          if errorlevel 1 exit /b 1
+
+      - name: Prepare pinned Windows build tools
+        if: matrix.platform == 'windows'
+        shell: cmd
+        run: |
+          cd /d %TBUILD%
+          call %TBUILD%\source\Telegram\build\prepare\win.bat silent msys64
+          if errorlevel 1 exit /b 1
+
+      - name: Pin Windows NASM
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $packageName = "mingw-w64-x86_64-nasm-$env:VERIFY_NASM_VERSION-any.pkg.tar.zst"
+          $msysTemp = Join-Path $env:TBUILD 'ThirdParty\msys64\tmp'
+          New-Item -ItemType Directory -Force -Path $msysTemp | Out-Null
+          $package = Join-Path $msysTemp $packageName
+          $signature = "$package.sig"
+          $msysPackage = "/tmp/$packageName"
+          $baseUrl = 'https://repo.msys2.org/mingw/mingw64'
+          Invoke-WebRequest -Uri "$baseUrl/$packageName" -OutFile $package
+          Invoke-WebRequest -Uri "$baseUrl/$packageName.sig" -OutFile $signature
+          $packageHash = (Get-FileHash -Algorithm SHA256 $package).Hash.ToLowerInvariant()
+          $signatureHash = (Get-FileHash -Algorithm SHA256 $signature).Hash.ToLowerInvariant()
+          if ($packageHash -ne $env:VERIFY_NASM_PACKAGE_SHA256) { throw "Unexpected NASM package SHA-256: $packageHash" }
+          if ($signatureHash -ne $env:VERIFY_NASM_SIGNATURE_SHA256) { throw "Unexpected NASM signature SHA-256: $signatureHash" }
+          $pacman = Join-Path $env:TBUILD 'ThirdParty\msys64\usr\bin\pacman.exe'
+          & $pacman -U --noconfirm $msysPackage
+          if ($LASTEXITCODE -ne 0) { throw "pacman failed with exit code $LASTEXITCODE" }
+          $installed = (& $pacman -Q mingw-w64-x86_64-nasm).Trim()
+          if ($installed -ne "mingw-w64-x86_64-nasm $env:VERIFY_NASM_VERSION") { throw "Unexpected NASM package: $installed" }
+          $nasm = Join-Path $env:TBUILD 'ThirdParty\msys64\mingw64\bin\nasm.exe'
+          $nasmVersion = (& $nasm -v).Trim()
+          if ($nasmVersion -notmatch '^NASM version 2\.16\.03') { throw "Unexpected NASM version: $nasmVersion" }
+          $nasmHash = (Get-FileHash -Algorithm SHA256 $nasm).Hash.ToLowerInvariant()
+          "VERIFY_NASM_EXE_SHA256=$nasmHash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host $installed
+          Write-Host $nasmVersion
+          Write-Host "nasm.exe SHA-256: $nasmHash"
+
       - name: Prepare macOS libraries
         if: matrix.platform == 'macos'
         shell: bash
@@ -178,6 +231,85 @@ jobs:
           cd /d %TBUILD%
           call %TBUILD%\source\Telegram\build\prepare\win.bat silent
           if errorlevel 1 exit /b 1
+
+      - name: Capture Windows dependency failure evidence
+        if: ${{ failure() && matrix.platform == 'windows' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $forensics = Join-Path $env:RUNNER_TEMP 'dependency-forensics'
+          $projects = Join-Path $forensics 'projects'
+          $objects = Join-Path $forensics 'objects'
+          $tbuild = if ([string]::IsNullOrWhiteSpace($env:TBUILD)) { Join-Path $env:GITHUB_WORKSPACE 'TBuild' } else { $env:TBUILD }
+          $nasm = Join-Path $tbuild 'ThirdParty\msys64\mingw64\bin\nasm.exe'
+          New-Item -ItemType Directory -Force -Path $projects, $objects | Out-Null
+          @(
+            "RUNNER_OS=$env:RUNNER_OS",
+            "RUNNER_ARCH=$env:RUNNER_ARCH",
+            "ImageOS=$env:ImageOS",
+            "ImageVersion=$env:ImageVersion",
+            "NASM_PACKAGE_VERSION=$env:VERIFY_NASM_VERSION",
+            "NASM_PACKAGE_SHA256=$env:VERIFY_NASM_PACKAGE_SHA256",
+            "NASM_SIGNATURE_SHA256=$env:VERIFY_NASM_SIGNATURE_SHA256",
+            "NASM_EXPECTED_EXE_SHA256=$env:VERIFY_NASM_EXE_SHA256"
+          ) | Set-Content -Encoding utf8NoBOM (Join-Path $forensics 'environment.txt')
+          $environmentFile = Join-Path $forensics 'environment.txt'
+          if (Test-Path $nasm) {
+            "NASM_EXACT_PATH=$nasm" | Add-Content -Encoding utf8NoBOM $environmentFile
+            "NASM_ACTUAL_EXE_SHA256=$((Get-FileHash -Algorithm SHA256 $nasm).Hash.ToLowerInvariant())" | Add-Content -Encoding utf8NoBOM $environmentFile
+            & $nasm -v 2>&1 | Out-String | Add-Content -Encoding utf8NoBOM $environmentFile
+          } else {
+            "NASM_EXACT_PATH_MISSING=$nasm" | Add-Content -Encoding utf8NoBOM $environmentFile
+          }
+          $originalPath = $env:PATH
+          $preparePathPrefix = "$(Join-Path $tbuild 'ThirdParty\msys64\usr\bin');$(Join-Path $tbuild 'ThirdParty\msys64\mingw64\bin')"
+          "PREPARE_PATH_PREFIX=$preparePathPrefix" | Add-Content -Encoding utf8NoBOM $environmentFile
+          try {
+            $env:PATH = "$preparePathPrefix;$originalPath"
+            Get-Command nasm -All -ErrorAction Stop | Format-List Name, Source, Version | Out-String | Add-Content -Encoding utf8NoBOM $environmentFile
+          } catch {
+            $_ | Out-String | Add-Content -Encoding utf8NoBOM $environmentFile
+          } finally {
+            $env:PATH = $originalPath
+          }
+          try {
+            Get-Command msbuild -ErrorAction Stop | Format-List Name, Source, Version | Out-String | Add-Content -Encoding utf8NoBOM $environmentFile
+            msbuild -version 2>&1 | Out-String | Add-Content -Encoding utf8NoBOM $environmentFile
+          } catch {
+            $_ | Out-String | Add-Content -Encoding utf8NoBOM $environmentFile
+          }
+          Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize | Out-String | Add-Content -Encoding utf8NoBOM $environmentFile
+          $libvpx = if ([string]::IsNullOrWhiteSpace($env:VERIFY_LIBRARIES)) { '' } else { Join-Path $env:VERIFY_LIBRARIES 'libvpx' }
+          if ($libvpx -and (Test-Path $libvpx)) {
+            Get-ChildItem -Path $libvpx -File | Where-Object {
+              $_.Name -match '^vpx.*\.(sln|mk|vcxproj)$'
+            } | Copy-Item -Destination $projects
+            $asmObjects = @(Get-ChildItem -Path $libvpx -Recurse -File -Filter '*_asm.obj')
+            $objectRows = foreach ($object in $asmObjects) {
+              $relative = [IO.Path]::GetRelativePath($libvpx, $object.FullName)
+              $target = Join-Path $objects $relative
+              New-Item -ItemType Directory -Force -Path (Split-Path $target) | Out-Null
+              Copy-Item $object.FullName $target
+              $hash = (Get-FileHash -Algorithm SHA256 $object.FullName).Hash.ToLowerInvariant()
+              "$relative`t$($object.Length)`t$hash"
+            }
+            $objectRows | Set-Content -Encoding utf8NoBOM (Join-Path $forensics 'asm-objects.tsv')
+            $headers = Join-Path $forensics 'rejected-object-headers.txt'
+            Get-ChildItem -Path $libvpx -Recurse -File -Filter 'vpx_dsp_x86_add_noise_sse2_asm.obj' | ForEach-Object {
+              "=== $($_.FullName) ===" | Add-Content -Encoding utf8NoBOM $headers
+              dumpbin /headers $_.FullName 2>&1 | Add-Content -Encoding utf8NoBOM $headers
+            }
+          }
+
+      - name: Upload Windows dependency failure evidence
+        if: ${{ failure() && matrix.platform == 'windows' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: windows-libvpx-forensics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dependency-forensics
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Prune macOS library intermediates
         if: matrix.platform == 'macos'
@@ -202,6 +334,7 @@ jobs:
           set -euo pipefail
           cd "$TBUILD/source/Telegram"
           ./configure.sh \
+            -D CMAKE_POLICY_DEFAULT_CMP0218=OLD \
             -D CMAKE_CONFIGURATION_TYPES=Release \
             -D CMAKE_COMPILE_WARNING_AS_ERROR=ON \
             -D CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
@@ -251,6 +384,7 @@ jobs:
             cmake --version
             clang --version
             file "$binary"
+            printf 'CMAKE_POLICY_DEFAULT_CMP0218=OLD\n'
             printf 'ImageOS=%s\nImageVersion=%s\nRUNNER_OS=%s\nRUNNER_ARCH=%s\n' "${ImageOS:-}" "${ImageVersion:-}" "$RUNNER_OS" "$RUNNER_ARCH"
           } > "$artifact_dir/toolchain.txt"
           binary_sha=$(shasum -a 256 "$binary" | awk '{print $1}')
@@ -279,6 +413,7 @@ jobs:
               "verification_tree": os.environ["VERIFICATION_TREE"],
               "configuration": "Release",
               "target": "Telegram",
+              "cmake_policy_default_cmp0218": "OLD",
               "output": "out/Release/AyuGram.app/Contents/MacOS/AyuGram",
               "archive": "AyuGram-macos-arm64.zip",
               "binary_sha256": os.environ["VERIFY_BINARY_SHA"],
@@ -307,7 +442,13 @@ jobs:
           Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $artifactDir
           New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
           $headers = dumpbin /headers $binary
+          $nasm = Join-Path $env:TBUILD 'ThirdParty\msys64\mingw64\bin\nasm.exe'
           if (-not ($headers | Select-String -SimpleMatch '8664 machine (x64)')) { throw 'Expected x64 PE header' }
+          $nasmVersion = (& $nasm -v).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "nasm failed with exit code $LASTEXITCODE" }
+          if ($nasmVersion -notmatch '^NASM version 2\.16\.03') { throw "Unexpected NASM version at package time: $nasmVersion" }
+          $nasmHash = (Get-FileHash -Algorithm SHA256 $nasm).Hash.ToLowerInvariant()
+          if ($nasmHash -ne $env:VERIFY_NASM_EXE_SHA256) { throw "NASM changed during the build: $nasmHash" }
           Compress-Archive -Path $binary -DestinationPath $archive
           Copy-Item "$env:RUNNER_TEMP\submodules.txt" "$artifactDir\submodules.txt"
           @(
@@ -315,6 +456,11 @@ jobs:
             "RUNNER_ARCH=$env:RUNNER_ARCH",
             "ImageOS=$env:ImageOS",
             "ImageVersion=$env:ImageVersion",
+            "NASM_PACKAGE_VERSION=$env:VERIFY_NASM_VERSION",
+            "NASM_PACKAGE_SHA256=$env:VERIFY_NASM_PACKAGE_SHA256",
+            "NASM_SIGNATURE_SHA256=$env:VERIFY_NASM_SIGNATURE_SHA256",
+            "NASM_EXE_SHA256=$nasmHash",
+            $nasmVersion,
             (cmake --version | Out-String),
             (cl 2>&1 | Out-String),
             ($headers | Out-String)
@@ -337,6 +483,10 @@ jobs:
             verification_tree = $env:VERIFICATION_TREE
             configuration = 'Release'
             target = 'Telegram'
+            nasm_package_version = $env:VERIFY_NASM_VERSION
+            nasm_package_sha256 = $env:VERIFY_NASM_PACKAGE_SHA256
+            nasm_signature_sha256 = $env:VERIFY_NASM_SIGNATURE_SHA256
+            nasm_exe_sha256 = $nasmHash
             output = 'out\Release\AyuGram.exe'
             archive = 'AyuGram-windows-x64.zip'
             binary_sha256 = $binaryHash
