@@ -43,6 +43,9 @@ jobs:
       VERIFY_BASE: ba8c1a6b0f456c6a5601d675e765cd5fba10d54c
       VERIFY_PR431: 9b48825b032cc7dec37fa38041835f38bf7f2641
       VERIFY_PR432: b16e587568a2ab6a267eb49805048bd6d89e27b3
+      VERIFY_NASM_VERSION: 2.16.03-1
+      VERIFY_NASM_PACKAGE_SHA256: 38e54ccf9e26aaaffecfee3b3376b22c08fb013fbd8faf5062b985a4fb215c81
+      VERIFY_NASM_SIGNATURE_SHA256: e8525fb2cc19a12b81ec7c9b77b5b626bfd840066872b8a649638c9626c7f246
       HOMEBREW_NO_AUTO_UPDATE: 1
 
     steps:
@@ -147,11 +150,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo xcode-select -s /Applications/Xcode_26.1.1.app/Contents/Developer
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
           brew install automake libtool meson nasm ninja pkg-config gnu-tar
           cmake --version
           xcodebuild -version
-          test "$(xcodebuild -version | sed -n '1p')" = 'Xcode 26.1.1'
+          test "$(xcodebuild -version | sed -n '1p')" = 'Xcode 16.4'
 
       - name: Enable Windows x64 toolchain
         if: matrix.platform == 'windows'
@@ -343,7 +346,7 @@ jobs:
             -D DESKTOP_APP_DISABLE_AUTOUPDATE=OFF \
             -D DESKTOP_APP_DISABLE_CRASH_REPORTS=OFF
           cd ..
-          cmake --build out --config Release --target Telegram -- -arch arm64 -quiet
+          cmake --build out --config Release --target Telegram -- -arch arm64 -quiet 2>&1 | tee "$RUNNER_TEMP/macos-build.log"
           test -f out/Release/AyuGram.app/Contents/MacOS/AyuGram
           file out/Release/AyuGram.app/Contents/MacOS/AyuGram | grep -F 'Mach-O 64-bit executable arm64'
 
@@ -378,6 +381,18 @@ jobs:
           mkdir -p "$artifact_dir"
           ditto -c -k --sequesterRsrc --keepParent "$TBUILD/source/out/Release/AyuGram.app" "$archive"
           cp "$RUNNER_TEMP/submodules.txt" "$artifact_dir/submodules.txt"
+          cp "$RUNNER_TEMP/macos-build.log" "$artifact_dir/build.log"
+          cache="$TBUILD/source/out/CMakeCache.txt"
+          cmp0218=$(awk -F= '$1 ~ /^CMAKE_POLICY_DEFAULT_CMP0218:/ { print $2 }' "$cache" | tail -n 1)
+          warning_as_error=$(awk -F= '$1 ~ /^CMAKE_COMPILE_WARNING_AS_ERROR:/ { print $2 }' "$cache" | tail -n 1)
+          xcode_version=$(xcodebuild -version | sed -n '1p')
+          macos_version=$(sw_vers -productVersion)
+          developer_dir=$(xcode-select -p)
+          printf 'CMP0218=%s WARNING_AS_ERROR=%s XCODE=%s DEVELOPER_DIR=%s\n' "$cmp0218" "$warning_as_error" "$xcode_version" "$developer_dir"
+          test "$cmp0218" = OLD
+          test "$warning_as_error" = OFF
+          test "$xcode_version" = 'Xcode 16.4'
+          test "$developer_dir" = '/Applications/Xcode.app/Contents/Developer'
           {
             uname -a
             sw_vers
@@ -385,8 +400,9 @@ jobs:
             cmake --version
             clang --version
             file "$binary"
-            printf 'CMAKE_POLICY_DEFAULT_CMP0218=OLD\n'
-            printf 'CMAKE_COMPILE_WARNING_AS_ERROR=OFF\n'
+            printf 'CMAKE_POLICY_DEFAULT_CMP0218=%s\n' "$cmp0218"
+            printf 'CMAKE_COMPILE_WARNING_AS_ERROR=%s\n' "$warning_as_error"
+            printf 'DEVELOPER_DIR=%s\n' "$developer_dir"
             printf 'ImageOS=%s\nImageVersion=%s\nRUNNER_OS=%s\nRUNNER_ARCH=%s\n' "${ImageOS:-}" "${ImageVersion:-}" "$RUNNER_OS" "$RUNNER_ARCH"
           } > "$artifact_dir/toolchain.txt"
           binary_sha=$(shasum -a 256 "$binary" | awk '{print $1}')
@@ -398,6 +414,11 @@ jobs:
           export VERIFY_ARCHIVE_SHA="$archive_sha"
           export VERIFY_BINARY_SIZE="$binary_size"
           export VERIFY_ARCHIVE_SIZE="$archive_size"
+          export VERIFY_CMAKE_CMP0218="$cmp0218"
+          export VERIFY_CMAKE_WARNING_AS_ERROR="$warning_as_error"
+          export VERIFY_XCODE_VERSION="$xcode_version"
+          export VERIFY_MACOS_VERSION="$macos_version"
+          export VERIFY_DEVELOPER_DIR="$developer_dir"
           python3 - "$artifact_dir/manifest.json" <<'PY'
           import json
           import os
@@ -415,8 +436,11 @@ jobs:
               "verification_tree": os.environ["VERIFICATION_TREE"],
               "configuration": "Release",
               "target": "Telegram",
-              "cmake_policy_default_cmp0218": "OLD",
-              "cmake_compile_warning_as_error": "OFF",
+              "cmake_policy_default_cmp0218": os.environ["VERIFY_CMAKE_CMP0218"],
+              "cmake_compile_warning_as_error": os.environ["VERIFY_CMAKE_WARNING_AS_ERROR"],
+              "xcode_version": os.environ["VERIFY_XCODE_VERSION"],
+              "macos_product_version": os.environ["VERIFY_MACOS_VERSION"],
+              "developer_dir": os.environ["VERIFY_DEVELOPER_DIR"],
               "output": "out/Release/AyuGram.app/Contents/MacOS/AyuGram",
               "archive": "AyuGram-macos-arm64.zip",
               "binary_sha256": os.environ["VERIFY_BINARY_SHA"],
@@ -434,6 +458,40 @@ jobs:
               json.dump(manifest, output, indent=2, sort_keys=True)
               output.write("\n")
           PY
+
+      - name: Capture macOS failure evidence
+        if: ${{ failure() && matrix.platform == 'macos' }}
+        shell: bash
+        run: |
+          set +e
+          forensics="$RUNNER_TEMP/macos-forensics"
+          reports="$forensics/diagnostic-reports"
+          mkdir -p "$reports"
+          {
+            uname -a
+            sw_vers
+            xcodebuild -version
+            xcode-select -p
+            clang --version
+            cmake --version
+            printf 'ImageOS=%s\nImageVersion=%s\nRUNNER_OS=%s\nRUNNER_ARCH=%s\n' "${ImageOS:-}" "${ImageVersion:-}" "$RUNNER_OS" "$RUNNER_ARCH"
+          } > "$forensics/toolchain.txt" 2>&1
+          df -h > "$forensics/disk.txt" 2>&1
+          test ! -f "$RUNNER_TEMP/macos-build.log" || cp "$RUNNER_TEMP/macos-build.log" "$forensics/build.log"
+          test ! -f "$TBUILD/source/out/CMakeCache.txt" || cp "$TBUILD/source/out/CMakeCache.txt" "$forensics/CMakeCache.txt"
+          if test -d "$HOME/Library/Logs/DiagnosticReports"; then
+            find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -type f '(' -name '*.ips' -o -name '*.crash' ')' -exec cp '{}' "$reports"/ ';'
+          fi
+
+      - name: Upload macOS failure evidence
+        if: ${{ failure() && matrix.platform == 'macos' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: macos-forensics-${{ matrix.candidate }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/macos-forensics
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 0
 
       - name: Package Windows evidence
         if: matrix.platform == 'windows'
