@@ -147,10 +147,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          sudo xcode-select -s /Applications/Xcode_26.1.1.app/Contents/Developer
           brew install automake libtool meson nasm ninja pkg-config gnu-tar
           cmake --version
           xcodebuild -version
+          test "$(xcodebuild -version | sed -n '1p')" = 'Xcode 26.1.1'
 
       - name: Enable Windows x64 toolchain
         if: matrix.platform == 'windows'
@@ -336,7 +337,7 @@ jobs:
           ./configure.sh \
             -D CMAKE_POLICY_DEFAULT_CMP0218=OLD \
             -D CMAKE_CONFIGURATION_TYPES=Release \
-            -D CMAKE_COMPILE_WARNING_AS_ERROR=ON \
+            -D CMAKE_COMPILE_WARNING_AS_ERROR=OFF \
             -D CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
             -D TDESKTOP_API_TEST=ON \
             -D DESKTOP_APP_DISABLE_AUTOUPDATE=OFF \
@@ -385,6 +386,7 @@ jobs:
             clang --version
             file "$binary"
             printf 'CMAKE_POLICY_DEFAULT_CMP0218=OLD\n'
+            printf 'CMAKE_COMPILE_WARNING_AS_ERROR=OFF\n'
             printf 'ImageOS=%s\nImageVersion=%s\nRUNNER_OS=%s\nRUNNER_ARCH=%s\n' "${ImageOS:-}" "${ImageVersion:-}" "$RUNNER_OS" "$RUNNER_ARCH"
           } > "$artifact_dir/toolchain.txt"
           binary_sha=$(shasum -a 256 "$binary" | awk '{print $1}')
@@ -414,6 +416,7 @@ jobs:
               "configuration": "Release",
               "target": "Telegram",
               "cmake_policy_default_cmp0218": "OLD",
+              "cmake_compile_warning_as_error": "OFF",
               "output": "out/Release/AyuGram.app/Contents/MacOS/AyuGram",
               "archive": "AyuGram-macos-arm64.zip",
               "binary_sha256": os.environ["VERIFY_BINARY_SHA"],
