@@ -84,7 +84,9 @@ jobs:
           set -euo pipefail
           verify_repo="$TBUILD/source"
           verification_sha=$(git -C "$verify_repo" rev-parse HEAD)
-          source_sha=$(git -C "$verify_repo" rev-parse HEAD^)
+          workflow_commit=$(git -C "$verify_repo" log --reverse --format=%H -- .github/workflows/fork-pr-verification.yml | sed -n '1p')
+          test -n "$workflow_commit"
+          source_sha=$(git -C "$verify_repo" rev-parse "$workflow_commit^")
           source_tree=$(git -C "$verify_repo" rev-parse "$source_sha^{tree}")
           verification_tree=$(git -C "$verify_repo" rev-parse 'HEAD^{tree}')
           test "$source_tree" = "$VERIFY_EXPECTED_TREE"
