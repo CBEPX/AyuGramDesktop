@@ -1,0 +1,376 @@
+name: Fork PR verification
+
+on:
+  push:
+    branches:
+      - verify/pr-431-9b48825b
+      - verify/pr-431-432-e0a6d980
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-pr-verification-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include: >-
+          ${{ fromJSON(
+            github.ref_name == 'verify/pr-431-9b48825b' &&
+            '[{"name":"PR 431 macOS ARM64 Release","runner":"macos-15","platform":"macos","candidate":"pr431","artifact":"pr431-macos-arm64-release-9b48825b","expected_source":"9b48825b032cc7dec37fa38041835f38bf7f2641","expected_tree":"60f367233e9a3cc5c36bf871f7ae071c62fa6a21"},{"name":"PR 431 Windows x64 Release","runner":"windows-2025","platform":"windows","candidate":"pr431","artifact":"pr431-windows-x64-release-9b48825b","expected_source":"9b48825b032cc7dec37fa38041835f38bf7f2641","expected_tree":"60f367233e9a3cc5c36bf871f7ae071c62fa6a21"}]' ||
+            '[{"name":"PR 431+432 macOS ARM64 Release","runner":"macos-15","platform":"macos","candidate":"pr431-pr432","artifact":"pr431-pr432-macos-arm64-release-e0a6d980","expected_source":"synthetic","expected_tree":"e0a6d98095c50f9170868c32312f2b81cfe95b39"}]'
+          ) }}
+    env:
+      VERIFY_PLATFORM: ${{ matrix.platform }}
+      VERIFY_CANDIDATE: ${{ matrix.candidate }}
+      VERIFY_ARTIFACT: ${{ matrix.artifact }}
+      VERIFY_EXPECTED_SOURCE: ${{ matrix.expected_source }}
+      VERIFY_EXPECTED_TREE: ${{ matrix.expected_tree }}
+      VERIFY_LOGICAL_JOB: ${{ matrix.name }}
+      VERIFY_BASE: ba8c1a6b0f456c6a5601d675e765cd5fba10d54c
+      VERIFY_PR431: 9b48825b032cc7dec37fa38041835f38bf7f2641
+      VERIFY_PR432: b16e587568a2ab6a267eb49805048bd6d89e27b3
+      HOMEBREW_NO_AUTO_UPDATE: 1
+
+    steps:
+      - name: Assert macOS runner
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_OS" = macOS
+          test "$RUNNER_ARCH" = ARM64
+          test "$(uname -m)" = arm64
+          df -h
+          mkdir -p "$GITHUB_WORKSPACE/TBuild"
+          printf 'TBUILD=%s\n' "$GITHUB_WORKSPACE/TBuild" >> "$GITHUB_ENV"
+          printf 'VERIFY_LIBRARIES=%s\n' "$GITHUB_WORKSPACE/TBuild/Libraries" >> "$GITHUB_ENV"
+
+      - name: Assert Windows runner
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          if ($env:RUNNER_OS -ne 'Windows') { throw "Expected Windows, got $env:RUNNER_OS" }
+          if ($env:RUNNER_ARCH -ne 'X64') { throw "Expected X64, got $env:RUNNER_ARCH" }
+          if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne [System.Runtime.InteropServices.Architecture]::X64) {
+            throw "Expected x64 process architecture"
+          }
+          Get-PSDrive -PSProvider FileSystem
+          New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\TBuild\Libraries" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\TBuild\ThirdParty" | Out-Null
+          cmd /c "mklink /d $env:GITHUB_WORKSPACE\TBuild $env:USERPROFILE\TBuild"
+          "TBUILD=$env:GITHUB_WORKSPACE\TBuild" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "VERIFY_LIBRARIES=$env:GITHUB_WORKSPACE\TBuild\Libraries\win64" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          git config --global core.longpaths true
+
+      - name: Checkout verification commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 3
+          path: TBuild/source
+          persist-credentials: false
+          submodules: false
+
+      - name: Verify source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          verify_repo="$TBUILD/source"
+          verification_sha=$(git -C "$verify_repo" rev-parse HEAD)
+          source_sha=$(git -C "$verify_repo" rev-parse HEAD^)
+          source_tree=$(git -C "$verify_repo" rev-parse "$source_sha^{tree}")
+          verification_tree=$(git -C "$verify_repo" rev-parse 'HEAD^{tree}')
+          test "$source_tree" = "$VERIFY_EXPECTED_TREE"
+          if [[ "$VERIFY_EXPECTED_SOURCE" = synthetic ]]; then
+            test "$(git -C "$verify_repo" show -s --format=%P "$source_sha")" = "$VERIFY_PR431 $VERIFY_PR432"
+          else
+            test "$source_sha" = "$VERIFY_EXPECTED_SOURCE"
+          fi
+          test "$(git -C "$verify_repo" diff --name-only "$source_sha" "$verification_sha")" = .github/workflows/fork-pr-verification.yml
+          git -C "$verify_repo" diff --check "$source_sha" "$verification_sha"
+          test -z "$(git -C "$verify_repo" status --short)"
+          {
+            printf 'SOURCE_SHA=%s\n' "$source_sha"
+            printf 'SOURCE_TREE=%s\n' "$source_tree"
+            printf 'VERIFICATION_SHA=%s\n' "$verification_sha"
+            printf 'VERIFICATION_TREE=%s\n' "$verification_tree"
+          } >> "$GITHUB_ENV"
+
+      - name: Prepare PR-only submodules
+        shell: bash
+        run: |
+          set -euo pipefail
+          verify_repo="$TBUILD/source"
+          prepare_pr_submodule() {
+            local sub_path=$1
+            local sub_url=$2
+            local pull_ref=$3
+            local expected_sha=$4
+            local full_path="$verify_repo/$sub_path"
+            if [[ -d "$full_path" ]]; then
+              rmdir "$full_path"
+            fi
+            git init -q "$full_path"
+            git -C "$full_path" remote add origin "$sub_url"
+            git -C "$full_path" fetch --quiet --no-tags --depth=1 origin "$pull_ref"
+            test "$(git -C "$full_path" rev-parse FETCH_HEAD)" = "$expected_sha"
+            git -C "$full_path" checkout --quiet --detach "$expected_sha"
+          }
+          git -C "$verify_repo" submodule init
+          prepare_pr_submodule Telegram/codegen https://github.com/AyuGram/codegen.git refs/pull/1/head a19201b77f510a0429be5346c3221cd92beca878
+          prepare_pr_submodule Telegram/lib_tl https://github.com/AyuGram/lib_tl.git refs/pull/1/head 33a0f73c01fa2a99bb7c7d58bf9e1e4f616c5f18
+          prepare_pr_submodule Telegram/lib_ui https://github.com/AyuGram/lib_ui.git refs/pull/4/head c07e96e96acbf3d9c92f301f27b1e67e001e6f4b
+          git -C "$verify_repo" submodule absorbgitdirs Telegram/codegen Telegram/lib_tl Telegram/lib_ui
+          git -C "$verify_repo" submodule update --init --recursive --jobs 4
+          test "$(git -C "$verify_repo/Telegram/codegen" rev-parse HEAD)" = a19201b77f510a0429be5346c3221cd92beca878
+          test "$(git -C "$verify_repo/Telegram/lib_tl" rev-parse HEAD)" = 33a0f73c01fa2a99bb7c7d58bf9e1e4f616c5f18
+          test "$(git -C "$verify_repo/Telegram/lib_ui" rev-parse HEAD)" = c07e96e96acbf3d9c92f301f27b1e67e001e6f4b
+          git -C "$verify_repo" submodule status --recursive > "$RUNNER_TEMP/submodules.txt"
+
+      - name: Install macOS build tools
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          brew install automake libtool meson nasm ninja pkg-config gnu-tar
+          cmake --version
+          xcodebuild -version
+
+      - name: Enable Windows x64 toolchain
+        if: matrix.platform == 'windows'
+        uses: Eden-CI/msvc-dev-cmd@1bd71f95d6f3d1b2b3395b335cc63bcdc90cf223
+        with:
+          arch: x64
+          sdk: 10.0.26100.0
+          toolset: 14.44
+          vsversion: "2022"
+
+      - name: Configure NuGet sources
+        if: matrix.platform == 'windows'
+        shell: cmd
+        run: |
+          nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
+          nuget sources Add -Source https://api.nuget.org/v3/index.json & exit 0
+
+      - name: Prepare macOS libraries
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$TBUILD"
+          "$TBUILD/source/Telegram/build/prepare/mac.sh" silent
+          df -h
+
+      - name: Prepare Windows libraries
+        if: matrix.platform == 'windows'
+        shell: cmd
+        run: |
+          cd /d %TBUILD%
+          call %TBUILD%\source\Telegram\build\prepare\win.bat silent
+          if errorlevel 1 exit /b 1
+
+      - name: Prune macOS library intermediates
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          find "$VERIFY_LIBRARIES" '(' '(' ! '(' -name '*.a' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -perm +111 ')' -type f ')' -o -empty ')' -delete
+          df -h
+
+      - name: Prune Windows library intermediates
+        if: matrix.platform == 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          find "$VERIFY_LIBRARIES" '(' '(' ! '(' -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' ')' -type f ')' -o -empty ')' -delete
+          df -h
+
+      - name: Build macOS ARM64 Release
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$TBUILD/source/Telegram"
+          ./configure.sh \
+            -D CMAKE_CONFIGURATION_TYPES=Release \
+            -D CMAKE_COMPILE_WARNING_AS_ERROR=ON \
+            -D CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
+            -D TDESKTOP_API_TEST=ON \
+            -D DESKTOP_APP_DISABLE_AUTOUPDATE=OFF \
+            -D DESKTOP_APP_DISABLE_CRASH_REPORTS=OFF
+          cd ..
+          cmake --build out --config Release --target Telegram -- -arch arm64 -quiet
+          test -f out/Release/AyuGram.app/Contents/MacOS/AyuGram
+          file out/Release/AyuGram.app/Contents/MacOS/AyuGram | grep -F 'Mach-O 64-bit executable arm64'
+
+      - name: Build Windows x64 Release
+        if: matrix.platform == 'windows'
+        shell: cmd
+        run: |
+          cd /d %TBUILD%\source\Telegram
+          call configure.bat x64 ^
+            -D TDESKTOP_API_TEST=ON ^
+            -D CMAKE_CONFIGURATION_TYPES=Release ^
+            -D CMAKE_COMPILE_WARNING_AS_ERROR=ON ^
+            -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT= ^
+            -D DESKTOP_APP_DISABLE_AUTOUPDATE=OFF ^
+            -D DESKTOP_APP_DISABLE_CRASH_REPORTS=OFF
+          if errorlevel 1 exit /b 1
+          cmake --build ..\out --config Release --target Telegram --parallel
+          if errorlevel 1 exit /b 1
+          if not exist ..\out\Release\AyuGram.exe exit /b 1
+          dumpbin /headers ..\out\Release\AyuGram.exe | findstr /c:"8664 machine (x64)"
+          if errorlevel 1 exit /b 1
+
+      - name: Package macOS evidence
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="$RUNNER_TEMP/verify-artifact"
+          binary="$TBUILD/source/out/Release/AyuGram.app/Contents/MacOS/AyuGram"
+          archive="$artifact_dir/AyuGram-macos-arm64.zip"
+          rm -rf "$artifact_dir"
+          mkdir -p "$artifact_dir"
+          ditto -c -k --sequesterRsrc --keepParent "$TBUILD/source/out/Release/AyuGram.app" "$archive"
+          cp "$RUNNER_TEMP/submodules.txt" "$artifact_dir/submodules.txt"
+          {
+            uname -a
+            sw_vers
+            xcodebuild -version
+            cmake --version
+            clang --version
+            file "$binary"
+            printf 'ImageOS=%s\nImageVersion=%s\nRUNNER_OS=%s\nRUNNER_ARCH=%s\n' "${ImageOS:-}" "${ImageVersion:-}" "$RUNNER_OS" "$RUNNER_ARCH"
+          } > "$artifact_dir/toolchain.txt"
+          binary_sha=$(shasum -a 256 "$binary" | awk '{print $1}')
+          archive_sha=$(shasum -a 256 "$archive" | awk '{print $1}')
+          binary_size=$(stat -f %z "$binary")
+          archive_size=$(stat -f %z "$archive")
+          printf '%s  %s\n%s  %s\n' "$archive_sha" "$(basename "$archive")" "$binary_sha" 'AyuGram.app/Contents/MacOS/AyuGram' > "$artifact_dir/checksums.sha256"
+          export VERIFY_BINARY_SHA="$binary_sha"
+          export VERIFY_ARCHIVE_SHA="$archive_sha"
+          export VERIFY_BINARY_SIZE="$binary_size"
+          export VERIFY_ARCHIVE_SIZE="$archive_size"
+          python3 - "$artifact_dir/manifest.json" <<'PY'
+          import json
+          import os
+          import sys
+
+          manifest = {
+              "artifact": os.environ["VERIFY_ARTIFACT"],
+              "logical_job": os.environ["VERIFY_LOGICAL_JOB"],
+              "candidate": os.environ["VERIFY_CANDIDATE"],
+              "branch": os.environ["GITHUB_REF_NAME"],
+              "base_sha": os.environ["VERIFY_BASE"],
+              "source_sha": os.environ["SOURCE_SHA"],
+              "source_tree": os.environ["SOURCE_TREE"],
+              "verification_sha": os.environ["VERIFICATION_SHA"],
+              "verification_tree": os.environ["VERIFICATION_TREE"],
+              "configuration": "Release",
+              "target": "Telegram",
+              "output": "out/Release/AyuGram.app/Contents/MacOS/AyuGram",
+              "archive": "AyuGram-macos-arm64.zip",
+              "binary_sha256": os.environ["VERIFY_BINARY_SHA"],
+              "archive_sha256": os.environ["VERIFY_ARCHIVE_SHA"],
+              "binary_size": int(os.environ["VERIFY_BINARY_SIZE"]),
+              "archive_size": int(os.environ["VERIFY_ARCHIVE_SIZE"]),
+              "runner_os": os.environ["RUNNER_OS"],
+              "runner_arch": os.environ["RUNNER_ARCH"],
+              "image_os": os.environ.get("ImageOS", ""),
+              "image_version": os.environ.get("ImageVersion", ""),
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+          }
+          with open(sys.argv[1], "w", encoding="utf-8") as output:
+              json.dump(manifest, output, indent=2, sort_keys=True)
+              output.write("\n")
+          PY
+
+      - name: Package Windows evidence
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $artifactDir = Join-Path $env:RUNNER_TEMP 'verify-artifact'
+          $binary = Join-Path $env:TBUILD 'source\out\Release\AyuGram.exe'
+          $archive = Join-Path $artifactDir 'AyuGram-windows-x64.zip'
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $artifactDir
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+          $headers = dumpbin /headers $binary
+          if (-not ($headers | Select-String -SimpleMatch '8664 machine (x64)')) { throw 'Expected x64 PE header' }
+          Compress-Archive -Path $binary -DestinationPath $archive
+          Copy-Item "$env:RUNNER_TEMP\submodules.txt" "$artifactDir\submodules.txt"
+          @(
+            "RUNNER_OS=$env:RUNNER_OS",
+            "RUNNER_ARCH=$env:RUNNER_ARCH",
+            "ImageOS=$env:ImageOS",
+            "ImageVersion=$env:ImageVersion",
+            (cmake --version | Out-String),
+            (cl 2>&1 | Out-String),
+            ($headers | Out-String)
+          ) | Set-Content -Encoding utf8NoBOM "$artifactDir\toolchain.txt"
+          $binaryHash = (Get-FileHash -Algorithm SHA256 $binary).Hash.ToLowerInvariant()
+          $archiveHash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          @(
+            "$archiveHash  AyuGram-windows-x64.zip",
+            "$binaryHash  AyuGram.exe"
+          ) | Set-Content -Encoding ascii "$artifactDir\checksums.sha256"
+          $manifest = [ordered]@{
+            artifact = $env:VERIFY_ARTIFACT
+            logical_job = $env:VERIFY_LOGICAL_JOB
+            candidate = $env:VERIFY_CANDIDATE
+            branch = $env:GITHUB_REF_NAME
+            base_sha = $env:VERIFY_BASE
+            source_sha = $env:SOURCE_SHA
+            source_tree = $env:SOURCE_TREE
+            verification_sha = $env:VERIFICATION_SHA
+            verification_tree = $env:VERIFICATION_TREE
+            configuration = 'Release'
+            target = 'Telegram'
+            output = 'out\Release\AyuGram.exe'
+            archive = 'AyuGram-windows-x64.zip'
+            binary_sha256 = $binaryHash
+            archive_sha256 = $archiveHash
+            binary_size = (Get-Item $binary).Length
+            archive_size = (Get-Item $archive).Length
+            runner_os = $env:RUNNER_OS
+            runner_arch = $env:RUNNER_ARCH
+            image_os = $env:ImageOS
+            image_version = $env:ImageVersion
+            run_id = $env:GITHUB_RUN_ID
+            run_attempt = $env:GITHUB_RUN_ATTEMPT
+          }
+          $manifest | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8NoBOM "$artifactDir\manifest.json"
+
+      - name: Upload verification artifact
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ runner.temp }}/verify-artifact
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Record upload digest
+        shell: bash
+        env:
+          VERIFY_UPLOAD_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          {
+            printf '### %s\n' "$VERIFY_LOGICAL_JOB"
+            printf -- '- Artifact: `%s`\n' "$VERIFY_ARTIFACT"
+            printf -- '- Artifact digest: `%s`\n' "$VERIFY_UPLOAD_DIGEST"
+            printf -- '- Source: `%s`\n' "$SOURCE_SHA"
+            printf -- '- Source tree: `%s`\n' "$SOURCE_TREE"
+            printf -- '- Runner: `%s/%s`\n' "$RUNNER_OS" "$RUNNER_ARCH"
+          } >> "$GITHUB_STEP_SUMMARY"
