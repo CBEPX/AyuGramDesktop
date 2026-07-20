@@ -165,6 +165,39 @@ jobs:
           nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
           nuget sources Add -Source https://api.nuget.org/v3/index.json & exit 0
 
+      - name: Prepare pinned Windows dependency patches
+        if: matrix.platform == 'windows'
+        shell: cmd
+        run: |
+          cd /d %TBUILD%
+          call %TBUILD%\source\Telegram\build\prepare\win.bat silent patches
+          if errorlevel 1 exit /b 1
+
+      - name: Serialize libvpx dependency build
+        if: matrix.platform == 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          script="$VERIFY_LIBRARIES/patches/build_libvpx_win.sh"
+          python3 - "$script" <<'PY'
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          source = path.read_text(encoding="utf-8")
+          build = "make -j$NUMBER_OF_PROCESSORS\n"
+          install = "make -j$NUMBER_OF_PROCESSORS install\n"
+          if source.count(build) != 1 or source.count(install) != 1:
+              raise SystemExit("Unexpected pinned libvpx helper")
+          source = source.replace(
+              build,
+              "sed -i 's/$(MSBUILD_TOOL) vpx.sln -m -t:Build/$(MSBUILD_TOOL) vpx.sln -m:1 -t:Build/' vpx.sln.mk\n"
+              "grep -F '$(MSBUILD_TOOL) vpx.sln -m:1 -t:Build' vpx.sln.mk\n"
+              "make -j1\n",
+          ).replace(install, "make -j1 install\n")
+          path.write_text(source, encoding="utf-8")
+          PY
+
       - name: Prepare macOS libraries
         if: matrix.platform == 'macos'
         shell: bash
