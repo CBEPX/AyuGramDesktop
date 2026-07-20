@@ -191,8 +191,9 @@ jobs:
               raise SystemExit("Unexpected pinned libvpx helper")
           source = source.replace(
               build,
-              "sed -i 's/$(MSBUILD_TOOL) vpx.sln -m -t:Build/$(MSBUILD_TOOL) vpx.sln -m:1 -t:Build/' vpx.sln.mk\n"
-              "grep -F '$(MSBUILD_TOOL) vpx.sln -m:1 -t:Build' vpx.sln.mk\n"
+              "test \"$(grep -F -c -- '-m -t:Build' build/make/gen_msvs_sln.sh)\" = 1\n"
+              "sed -i 's/-m -t:Build/-m:1 -t:Build/' build/make/gen_msvs_sln.sh\n"
+              "test \"$(grep -F -c -- '-m:1 -t:Build' build/make/gen_msvs_sln.sh)\" = 1\n"
               "make -j1\n",
           ).replace(install, "make -j1 install\n")
           path.write_text(source, encoding="utf-8")
