@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - verify/pr-431-9b48825b
+      - verify/pr-431-windows-x64-retry
       - verify/pr-431-432-e0a6d980
 
 permissions:
@@ -24,7 +25,9 @@ jobs:
         include: >-
           ${{ fromJSON(
             github.ref_name == 'verify/pr-431-9b48825b' &&
-            '[{"name":"PR 431 macOS ARM64 Release","runner":"macos-15","platform":"macos","candidate":"pr431","artifact":"pr431-macos-arm64-release-9b48825b","expected_source":"9b48825b032cc7dec37fa38041835f38bf7f2641","expected_tree":"60f367233e9a3cc5c36bf871f7ae071c62fa6a21"},{"name":"PR 431 Windows x64 Release","runner":"windows-2025","platform":"windows","candidate":"pr431","artifact":"pr431-windows-x64-release-9b48825b","expected_source":"9b48825b032cc7dec37fa38041835f38bf7f2641","expected_tree":"60f367233e9a3cc5c36bf871f7ae071c62fa6a21"}]' ||
+            '[{"name":"PR 431 macOS ARM64 Release","runner":"macos-15","platform":"macos","candidate":"pr431","artifact":"pr431-macos-arm64-release-9b48825b","expected_source":"9b48825b032cc7dec37fa38041835f38bf7f2641","expected_tree":"60f367233e9a3cc5c36bf871f7ae071c62fa6a21"},{"name":"PR 431 Windows x64 Release","runner":"windows-2022","platform":"windows","candidate":"pr431","artifact":"pr431-windows-x64-release-9b48825b","expected_source":"9b48825b032cc7dec37fa38041835f38bf7f2641","expected_tree":"60f367233e9a3cc5c36bf871f7ae071c62fa6a21"}]' ||
+            github.ref_name == 'verify/pr-431-windows-x64-retry' &&
+            '[{"name":"PR 431 Windows x64 Release retry","runner":"windows-2022","platform":"windows","candidate":"pr431","artifact":"pr431-windows-x64-release-9b48825b","expected_source":"9b48825b032cc7dec37fa38041835f38bf7f2641","expected_tree":"60f367233e9a3cc5c36bf871f7ae071c62fa6a21"}]' ||
             '[{"name":"PR 431+432 macOS ARM64 Release","runner":"macos-15","platform":"macos","candidate":"pr431-pr432","artifact":"pr431-pr432-macos-arm64-release-e0a6d980","expected_source":"synthetic","expected_tree":"e0a6d98095c50f9170868c32312f2b81cfe95b39"}]'
           ) }}
     env:
