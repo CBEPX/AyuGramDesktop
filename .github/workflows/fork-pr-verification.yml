@@ -46,6 +46,7 @@ jobs:
       VERIFY_NASM_VERSION: 2.16.03-1
       VERIFY_NASM_PACKAGE_SHA256: 38e54ccf9e26aaaffecfee3b3376b22c08fb013fbd8faf5062b985a4fb215c81
       VERIFY_NASM_SIGNATURE_SHA256: e8525fb2cc19a12b81ec7c9b77b5b626bfd840066872b8a649638c9626c7f246
+      VERIFY_MACOS_PARALLEL_LEVEL: 2
       HOMEBREW_NO_AUTO_UPDATE: 1
 
     steps:
@@ -383,6 +384,8 @@ jobs:
       - name: Build macOS ARM64 Release
         if: matrix.platform == 'macos'
         shell: bash
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: ${{ env.VERIFY_MACOS_PARALLEL_LEVEL }}
         run: |
           set -euo pipefail
           cd "$TBUILD/source/Telegram"
@@ -401,6 +404,8 @@ jobs:
             printf 'Insufficient build disk headroom: %s GiB free, need at least 30 GiB\n' "$free_gb" >&2
             exit 1
           fi
+          test "$CMAKE_BUILD_PARALLEL_LEVEL" = 2
+          printf 'CMAKE_BUILD_PARALLEL_LEVEL=%s\n' "$CMAKE_BUILD_PARALLEL_LEVEL"
           cmake --build out --config Release --target Telegram -- -arch arm64 -quiet 2>&1 | tee "$RUNNER_TEMP/macos-build.log"
           test -f out/Release/AyuGram.app/Contents/MacOS/AyuGram
           file out/Release/AyuGram.app/Contents/MacOS/AyuGram | grep -F 'Mach-O 64-bit executable arm64'
@@ -448,6 +453,7 @@ jobs:
           test "$warning_as_error" = OFF
           test "$xcode_version" = 'Xcode 16.4'
           test "$developer_dir" = '/Applications/Xcode.app/Contents/Developer'
+          test "$VERIFY_MACOS_PARALLEL_LEVEL" = 2
           {
             uname -a
             sw_vers
@@ -457,6 +463,7 @@ jobs:
             file "$binary"
             printf 'CMAKE_POLICY_DEFAULT_CMP0218=%s\n' "$cmp0218"
             printf 'CMAKE_COMPILE_WARNING_AS_ERROR=%s\n' "$warning_as_error"
+            printf 'CMAKE_BUILD_PARALLEL_LEVEL=%s\n' "$VERIFY_MACOS_PARALLEL_LEVEL"
             printf 'DEVELOPER_DIR=%s\n' "$developer_dir"
             printf 'ImageOS=%s\nImageVersion=%s\nRUNNER_OS=%s\nRUNNER_ARCH=%s\n' "${ImageOS:-}" "${ImageVersion:-}" "$RUNNER_OS" "$RUNNER_ARCH"
           } > "$artifact_dir/toolchain.txt"
@@ -493,6 +500,7 @@ jobs:
               "target": "Telegram",
               "cmake_policy_default_cmp0218": os.environ["VERIFY_CMAKE_CMP0218"],
               "cmake_compile_warning_as_error": os.environ["VERIFY_CMAKE_WARNING_AS_ERROR"],
+              "cmake_build_parallel_level": int(os.environ["VERIFY_MACOS_PARALLEL_LEVEL"]),
               "xcode_version": os.environ["VERIFY_XCODE_VERSION"],
               "macos_product_version": os.environ["VERIFY_MACOS_VERSION"],
               "developer_dir": os.environ["VERIFY_DEVELOPER_DIR"],
@@ -529,6 +537,7 @@ jobs:
             xcode-select -p
             clang --version
             cmake --version
+            printf 'CMAKE_BUILD_PARALLEL_LEVEL=%s\n' "$VERIFY_MACOS_PARALLEL_LEVEL"
             printf 'ImageOS=%s\nImageVersion=%s\nRUNNER_OS=%s\nRUNNER_ARCH=%s\n' "${ImageOS:-}" "${ImageVersion:-}" "$RUNNER_OS" "$RUNNER_ARCH"
           } > "$forensics/toolchain.txt" 2>&1
           df -h > "$forensics/disk.txt" 2>&1
