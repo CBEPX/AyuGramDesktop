@@ -156,6 +156,49 @@ jobs:
           xcodebuild -version
           test "$(xcodebuild -version | sed -n '1p')" = 'Xcode 16.4'
 
+      - name: Reclaim macOS hosted-runner disk
+        if: matrix.platform == 'macos'
+        shell: bash
+        env:
+          VERIFY_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          test "$VERIFY_RUNNER_ENVIRONMENT" = github-hosted
+          test -n "${ImageVersion:-}"
+          case "${ImageOS:-}" in
+            macos15*) ;;
+            *)
+              printf 'Unexpected hosted image: %s\n' "${ImageOS:-unset}" >&2
+              exit 1
+              ;;
+          esac
+          selected_xcode=$(realpath /Applications/Xcode.app)
+          test "$selected_xcode" = /Applications/Xcode_16.4.app
+          find /Applications -mindepth 1 -maxdepth 1 -type d -name 'Xcode_*.app' -print0 |
+            while IFS= read -r -d '' bundle; do
+              case "$bundle" in
+                /Applications/Xcode_[0-9]*.app) ;;
+                *)
+                  printf 'Refusing unexpected Xcode path: %s\n' "$bundle" >&2
+                  exit 1
+                  ;;
+              esac
+              bundle_real=$(realpath "$bundle")
+              test "$bundle_real" = "$bundle"
+              if [ "$bundle_real" != "$selected_xcode" ]; then
+                printf 'Removing unused hosted Xcode bundle: %s\n' "$bundle"
+                sudo rm -rf -- "$bundle"
+              fi
+            done
+          test "$(realpath /Applications/Xcode.app)" = "$selected_xcode"
+          test "$(xcodebuild -version | sed -n '1p')" = 'Xcode 16.4'
+          test "$(xcode-select -p)" = '/Applications/Xcode.app/Contents/Developer'
+          xcrun -f clang
+          sudo /usr/bin/xcrun simctl runtime delete all
+          test "$(xcodebuild -version | sed -n '1p')" = 'Xcode 16.4'
+          xcrun -f clang
+          df -g "$TBUILD"
+
       - name: Enable Windows x64 toolchain
         if: matrix.platform == 'windows'
         uses: Eden-CI/msvc-dev-cmd@1bd71f95d6f3d1b2b3395b335cc63bcdc90cf223
@@ -322,6 +365,12 @@ jobs:
           set -euo pipefail
           find "$VERIFY_LIBRARIES" '(' '(' ! '(' -name '*.a' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -perm +111 ')' -type f ')' -o -empty ')' -delete
           df -h
+          df -g "$TBUILD"
+          free_gb=$(df -g "$TBUILD" | awk 'NR == 2 { print $4 }')
+          if ! [[ "$free_gb" =~ ^[0-9]+$ ]] || (( free_gb < 30 )); then
+            printf 'Insufficient pre-build disk headroom: %s GiB free, need at least 30 GiB\n' "$free_gb" >&2
+            exit 1
+          fi
 
       - name: Prune Windows library intermediates
         if: matrix.platform == 'windows'
@@ -346,6 +395,12 @@ jobs:
             -D DESKTOP_APP_DISABLE_AUTOUPDATE=OFF \
             -D DESKTOP_APP_DISABLE_CRASH_REPORTS=OFF
           cd ..
+          df -g "$TBUILD"
+          free_gb=$(df -g "$TBUILD" | awk 'NR == 2 { print $4 }')
+          if ! [[ "$free_gb" =~ ^[0-9]+$ ]] || (( free_gb < 30 )); then
+            printf 'Insufficient build disk headroom: %s GiB free, need at least 30 GiB\n' "$free_gb" >&2
+            exit 1
+          fi
           cmake --build out --config Release --target Telegram -- -arch arm64 -quiet 2>&1 | tee "$RUNNER_TEMP/macos-build.log"
           test -f out/Release/AyuGram.app/Contents/MacOS/AyuGram
           file out/Release/AyuGram.app/Contents/MacOS/AyuGram | grep -F 'Mach-O 64-bit executable arm64'
