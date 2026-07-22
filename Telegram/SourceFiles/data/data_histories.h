@@ -8,6 +8,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "base/timer.h"
+#include "data/data_types.h"
 
 class History;
 class HistoryItem;
@@ -58,9 +59,16 @@ public:
 	void unloadAll();
 	void clearAll();
 
-	void readInbox(not_null<History*> history);
-	void readInboxTill(not_null<HistoryItem*> item);
-	void readInboxTill(not_null<History*> history, MsgId tillId);
+	void readInbox(
+		not_null<History*> history,
+		ReadMode mode = ReadMode::RespectSettings);
+	void readInboxTill(
+		not_null<HistoryItem*> item,
+		ReadMode mode = ReadMode::RespectSettings);
+	void readInboxTill(
+		not_null<History*> history,
+		MsgId tillId,
+		ReadMode mode = ReadMode::RespectSettings);
 	void readInboxOnNewMessage(not_null<HistoryItem*> item);
 	void readClientSideMessage(not_null<HistoryItem*> item);
 	void sendPendingReadInbox(not_null<History*> history);
@@ -71,10 +79,14 @@ public:
 		not_null<History*> history,
 		Fn<void()> callback = nullptr);
 	void dialogEntryApplied(not_null<History*> history);
-	void changeDialogUnreadMark(not_null<History*> history, bool unread);
+	void changeDialogUnreadMark(
+		not_null<History*> history,
+		bool unread,
+		ReadMode mode = ReadMode::RespectSettings);
 	void changeSublistUnreadMark(
 		not_null<Data::SavedSublist*> sublist,
-		bool unread);
+		bool unread,
+		ReadMode mode = ReadMode::RespectSettings);
 	void requestFakeChatListMessage(not_null<History*> history);
 
 	void requestGroupAround(not_null<HistoryItem*> item);
@@ -156,6 +168,7 @@ private:
 		MsgId willReadTill = 0;
 		MsgId sentReadTill = 0;
 		crl::time willReadWhen = 0;
+		uint64 readInboxRequestGeneration = 0;
 		bool sentReadDone = false;
 		bool postponedRequestEntry = false;
 	};
@@ -192,9 +205,17 @@ private:
 		}
 	}
 
-	void readInboxTill(not_null<History*> history, MsgId tillId, bool force);
+	void readInboxTill(
+		not_null<History*> history,
+		MsgId tillId,
+		bool force,
+		ReadMode mode);
 	void sendReadRequests();
-	void sendReadRequest(not_null<History*> history, State &state);
+	void sendReadRequest(
+		not_null<History*> history,
+		State &state,
+		ReadMode mode);
+	void updateReadRequestsTimer();
 	[[nodiscard]] State *lookup(not_null<History*> history);
 	void checkEmptyState(not_null<History*> history);
 	void checkPostponed(not_null<History*> history, int id);
@@ -220,6 +241,7 @@ private:
 	std::unordered_map<PeerId, std::unique_ptr<History>> _map;
 	base::flat_map<not_null<History*>, State> _states;
 	base::flat_map<int, not_null<History*>> _historyByRequest;
+	uint64 _readInboxRequestGeneration = 0;
 	int _requestAutoincrement = 0;
 	base::Timer _readRequestsTimer;
 

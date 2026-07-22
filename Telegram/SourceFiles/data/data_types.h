@@ -40,6 +40,12 @@ namespace Data {
 struct FileOrigin;
 struct EmojiStatusCollectible;
 
+enum class ReadMode {
+	RespectSettings,
+	LocalOnly,
+	ForceSend,
+};
+
 struct UploadState {
 	explicit UploadState(int64 size) : size(size) {
 	}

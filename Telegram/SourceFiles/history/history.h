@@ -209,7 +209,9 @@ public:
 		-> const base::flat_set<not_null<HistoryItem*>> &;
 	[[nodiscard]] HistoryItem *latestSendingMessage() const;
 
-	[[nodiscard]] bool readInboxTillNeedsRequest(MsgId tillId);
+	[[nodiscard]] bool readInboxTillNeedsRequest(
+		MsgId tillId,
+		Data::ReadMode mode);
 	void applyInboxReadUpdate(
 		FolderId folderId,
 		MsgId upTo,

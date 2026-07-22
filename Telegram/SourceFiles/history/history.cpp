@@ -2090,12 +2090,14 @@ void History::calculateFirstUnreadMessage() {
 	}
 }
 
-bool History::readInboxTillNeedsRequest(MsgId tillId) {
+bool History::readInboxTillNeedsRequest(
+		MsgId tillId,
+		Data::ReadMode mode) {
 	Expects(!tillId || IsServerMsgId(tillId));
 
 	readClientSideMessages();
 	if (unreadMark()) {
-		owner().histories().changeDialogUnreadMark(this, false);
+		owner().histories().changeDialogUnreadMark(this, false, mode);
 	}
 	DEBUG_LOG(("Reading: readInboxTillNeedsRequest is_server %1, before %2."
 		).arg(Logs::b(IsServerMsgId(tillId))
