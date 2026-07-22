@@ -72,7 +72,9 @@ RepliesList::RepliesList(
 , _owningTopic(owningTopic)
 , _rootId(rootId)
 , _creating(IsCreating(history, rootId))
-, _readRequestTimer([=] { sendReadTillRequest(); }) {
+, _readRequestTimer([=] {
+	sendReadTillRequest(ReadMode::RespectSettings);
+}) {
 	if (_owningTopic) {
 		_owningTopic->destroyed(
 		) | rpl::on_next([=] {
@@ -88,7 +90,7 @@ RepliesList::~RepliesList() {
 	histories().cancelRequest(base::take(_beforeId));
 	histories().cancelRequest(base::take(_afterId));
 	if (_readRequestTimer.isActive()) {
-		sendReadTillRequest();
+		sendReadTillRequest(ReadMode::RespectSettings);
 	}
 	if (_divider) {
 		_divider->destroy();
@@ -962,28 +964,42 @@ void RepliesList::requestUnreadCount() {
 	}).send();
 }
 
-void RepliesList::readTill(not_null<HistoryItem*> item) {
-	readTill(item->id, item);
+void RepliesList::readTill(
+		not_null<HistoryItem*> item,
+		ReadMode mode) {
+	readTill(item->id, item, mode);
 }
 
-void RepliesList::readTill(MsgId tillId) {
-	readTill(tillId, _history->owner().message(_history->peer->id, tillId));
+void RepliesList::readTill(MsgId tillId, ReadMode mode) {
+	readTill(
+		tillId,
+		_history->owner().message(_history->peer->id, tillId),
+		mode);
 }
 
 void RepliesList::readTill(
 		MsgId tillId,
-		HistoryItem *tillIdItem) {
+		HistoryItem *tillIdItem,
+		ReadMode mode) {
 	if (!IsServerMsgId(tillId)) {
+		if (mode == ReadMode::LocalOnly) {
+			sendReadTillRequest(mode);
+		}
 		return;
 	}
 	const auto was = computeInboxReadTillFull();
 	const auto now = tillId;
-	if (now < was) {
+	if (now < was && mode == ReadMode::RespectSettings) {
 		return;
 	}
-	const auto unreadCount = computeUnreadCountLocally(now);
-	const auto fast = (tillIdItem && tillIdItem->out()) || !unreadCount.has_value();
-	if (was < now || (fast && now == was)) {
+	const auto valid = (now >= was);
+	const auto unreadCount = valid
+		? computeUnreadCountLocally(now)
+		: std::optional<int>();
+	const auto fast = valid
+		&& ((tillIdItem && tillIdItem->out()) || !unreadCount.has_value());
+	const auto changed = valid && (was < now || (fast && now == was));
+	if (changed) {
 		setInboxReadTill(now, unreadCount);
 		const auto rootFullId = FullMsgId(_history->peer->id, _rootId);
 		if (const auto root = _history->owner().message(rootFullId)) {
@@ -991,26 +1007,33 @@ void RepliesList::readTill(
 				post->setCommentsInboxReadTill(now);
 			}
 		}
+	}
+	if (const auto topic = _history->peer->forumTopicFor(_rootId)) {
+		Core::App().notifications().clearIncomingFromTopic(topic);
+	}
+	if (mode != ReadMode::RespectSettings) {
+		sendReadTillRequest(mode);
+	} else if (changed) {
 		if (!_readRequestTimer.isActive()) {
 			_readRequestTimer.callOnce(fast ? 0 : kReadRequestTimeout);
 		} else if (fast && _readRequestTimer.remainingTime() > 0) {
 			_readRequestTimer.callOnce(0);
 		}
 	}
-	if (const auto topic = _history->peer->forumTopicFor(_rootId)) {
-		Core::App().notifications().clearIncomingFromTopic(topic);
-	}
 }
 
-void RepliesList::sendReadTillRequest() {
+void RepliesList::sendReadTillRequest(ReadMode mode) {
 	if (_readRequestTimer.isActive()) {
 		_readRequestTimer.cancel();
+	}
+	if (mode == ReadMode::LocalOnly) {
+		return;
 	}
 	const auto api = &_history->session().api();
 	api->request(base::take(_readRequestId)).cancel();
 
 	const auto &ghost = AyuSettings::ghost(&_history->session());
-	if (!ghost.sendReadMessages()) {
+	if (mode == ReadMode::RespectSettings && !ghost.sendReadMessages()) {
 		return;
 	}
 
@@ -1018,9 +1041,20 @@ void RepliesList::sendReadTillRequest() {
 		_history->peer->input(),
 		MTP_int(_rootId),
 		MTP_int(computeInboxReadTillFull())
-	)).done(crl::guard(this, [=] {
+	)).done(crl::guard(this, [=](
+			const MTPBool &,
+			mtpRequestId requestId) {
+		if (_readRequestId != requestId) {
+			return;
+		}
 		_readRequestId = 0;
 		reloadUnreadCountIfNeeded();
+	})).fail(crl::guard(this, [=](
+			const MTP::Error &,
+			mtpRequestId requestId) {
+		if (_readRequestId == requestId) {
+			_readRequestId = 0;
+		}
 	})).send();
 }
 

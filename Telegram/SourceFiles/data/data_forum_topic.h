@@ -7,9 +7,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include "data/data_thread.h"
-#include "data/notify/data_peer_notify_settings.h"
 #include "base/flags.h"
+#include "data/notify/data_peer_notify_settings.h"
+#include "data/data_thread.h"
+#include "data/data_types.h"
 
 class ChannelData;
 enum class ChatRestriction;
@@ -120,7 +121,7 @@ public:
 	void discard();
 
 	void setRealRootId(MsgId realId);
-	void readTillEnd();
+	void readTillEnd(ReadMode mode = ReadMode::RespectSettings);
 	void requestChatListMessage();
 
 	void applyTopic(const MTPDforumTopic &data);

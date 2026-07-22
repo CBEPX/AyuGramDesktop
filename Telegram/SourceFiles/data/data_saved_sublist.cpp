@@ -9,6 +9,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "api/api_unread_things.h"
 #include "apiwrap.h"
+#include "ayu/ayu_settings.h"
 #include "core/application.h"
 #include "data/data_changes.h"
 #include "data/data_channel.h"
@@ -49,7 +50,9 @@ SavedSublist::SavedSublist(
 : Thread(&sublistPeer->owner(), Dialogs::Entry::Type::SavedSublist)
 , _parent(parent)
 , _sublistHistory(sublistPeer->owner().history(sublistPeer))
-, _readRequestTimer([=] { sendReadTillRequest(); }) {
+, _readRequestTimer([=] {
+	sendReadTillRequest(ReadMode::RespectSettings);
+}) {
 	if (parent->parentChat()) {
 		_flags |= Flag::InMonoforum;
 	}
@@ -60,7 +63,7 @@ SavedSublist::~SavedSublist() {
 	histories().cancelRequest(base::take(_beforeId));
 	histories().cancelRequest(base::take(_afterId));
 	if (_readRequestTimer.isActive()) {
-		sendReadTillRequest();
+		sendReadTillRequest(ReadMode::RespectSettings);
 	}
 	session().api().unreadThings().cancelRequests(this);
 }
@@ -282,8 +285,8 @@ void SavedSublist::setRestorePinnedWhenNonEmpty(bool restore) {
 	_restorePinnedWhenNonEmpty = restore;
 }
 
-void SavedSublist::readTillEnd() {
-	readTill(_lastKnownServerMessageId);
+void SavedSublist::readTillEnd(ReadMode mode) {
+	readTill(_lastKnownServerMessageId, mode);
 }
 
 bool SavedSublist::buildFromData(not_null<Viewer*> viewer) {
@@ -656,65 +659,103 @@ void SavedSublist::requestUnreadCount() {
 	parent()->requestSublist(sublistPeer());
 }
 
-void SavedSublist::readTill(not_null<HistoryItem*> item) {
-	readTill(item->id, item);
+void SavedSublist::readTill(
+		not_null<HistoryItem*> item,
+		ReadMode mode) {
+	readTill(item->id, item, mode);
 }
 
-void SavedSublist::readTill(MsgId tillId) {
+void SavedSublist::readTill(MsgId tillId, ReadMode mode) {
 	const auto parentChat = _parent->parentChat();
 	if (!parentChat) {
+		if (mode != ReadMode::RespectSettings) {
+			sendReadTillRequest(mode);
+		}
 		return;
 	}
-	readTill(tillId, owner().message(parentChat->id, tillId));
+	readTill(tillId, owner().message(parentChat->id, tillId), mode);
 }
 
 void SavedSublist::readTill(
 		MsgId tillId,
-		HistoryItem *tillIdItem) {
+		HistoryItem *tillIdItem,
+		ReadMode mode) {
 	if (!IsServerMsgId(tillId)) {
+		if (mode == ReadMode::LocalOnly) {
+			sendReadTillRequest(mode);
+		}
 		return;
-	}
-	if (unreadMark()) {
-		owner().histories().changeSublistUnreadMark(this, false);
 	}
 	const auto was = computeInboxReadTillFull();
 	const auto now = tillId;
-	if (now < was) {
+	if (now < was && mode == ReadMode::RespectSettings) {
+		if (unreadMark()) {
+			owner().histories().changeSublistUnreadMark(this, false, mode);
+		}
 		return;
 	}
-	const auto unreadCount = computeUnreadCountLocally(now);
-	const auto fast = (tillIdItem && tillIdItem->out())
-		|| !unreadCount.has_value();
-	if (was < now || (fast && now == was)) {
+	const auto valid = (now >= was);
+	const auto unreadCount = valid
+		? computeUnreadCountLocally(now)
+		: std::optional<int>();
+	const auto fast = valid
+		&& ((tillIdItem && tillIdItem->out()) || !unreadCount.has_value());
+	const auto changed = valid && (was < now || (fast && now == was));
+	if (changed) {
 		setInboxReadTill(now, unreadCount);
+	}
+	Core::App().notifications().clearIncomingFromSublist(this);
+	if (unreadMark()) {
+		owner().histories().changeSublistUnreadMark(this, false, mode);
+	}
+	if (mode != ReadMode::RespectSettings) {
+		sendReadTillRequest(mode);
+	} else if (changed) {
 		if (!_readRequestTimer.isActive()) {
 			_readRequestTimer.callOnce(fast ? 0 : kReadRequestTimeout);
 		} else if (fast && _readRequestTimer.remainingTime() > 0) {
 			_readRequestTimer.callOnce(0);
 		}
 	}
-	Core::App().notifications().clearIncomingFromSublist(this);
 }
 
-void SavedSublist::sendReadTillRequest() {
-	const auto parentChat = _parent->parentChat();
-	if (!parentChat) {
-		return;
-	}
+void SavedSublist::sendReadTillRequest(ReadMode mode) {
 	if (_readRequestTimer.isActive()) {
 		_readRequestTimer.cancel();
+	}
+	_sentReadTill = computeInboxReadTillFull();
+	if (mode == ReadMode::LocalOnly) {
+		return;
 	}
 	const auto api = &_parent->session().api();
 	api->request(base::take(_readRequestId)).cancel();
 
-	_sentReadTill = computeInboxReadTillFull();
+	const auto parentChat = _parent->parentChat();
+	if (!parentChat) {
+		return;
+	}
+	const auto &ghost = AyuSettings::ghost(&_parent->session());
+	if (mode == ReadMode::RespectSettings && !ghost.sendReadMessages()) {
+		return;
+	}
 	_readRequestId = api->request(MTPmessages_ReadSavedHistory(
 		parentChat->input(),
 		sublistPeer()->input(),
 		MTP_int(_sentReadTill.bare)
-	)).done(crl::guard(this, [=] {
+	)).done(crl::guard(this, [=](
+			const MTPBool &,
+			mtpRequestId requestId) {
+		if (_readRequestId != requestId) {
+			return;
+		}
 		_readRequestId = 0;
 		reloadUnreadCountIfNeeded();
+	})).fail(crl::guard(this, [=](
+			const MTP::Error &,
+			mtpRequestId requestId) {
+		if (_readRequestId == requestId) {
+			_readRequestId = 0;
+		}
 	})).send();
 }
 
@@ -775,7 +816,7 @@ void SavedSublist::applyMonoforumDialog(
 		// we need either to send a read request with this new value,
 		// or to downgrade inboxReadTillId locally.
 		if (_sentReadTill < computeInboxReadTillFull()) {
-			sendReadTillRequest();
+			sendReadTillRequest(ReadMode::RespectSettings);
 		} else {
 			// Just if nothing else helps.
 			_inboxReadTillId = 0;
