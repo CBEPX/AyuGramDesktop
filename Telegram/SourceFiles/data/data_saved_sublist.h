@@ -9,6 +9,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "base/timer.h"
 #include "data/data_thread.h"
+#include "data/data_types.h"
 #include "dialogs/ui/dialogs_message_view.h"
 
 class PeerData;
@@ -70,7 +71,7 @@ public:
 	void applyMonoforumDialog(
 		const MTPDmonoForumDialog &dialog,
 		not_null<HistoryItem*> topItem);
-	void readTillEnd();
+	void readTillEnd(ReadMode mode = ReadMode::RespectSettings);
 	void requestChatListMessage();
 	void setRestorePinnedWhenNonEmpty(bool restore);
 
@@ -110,8 +111,12 @@ public:
 
 	void requestUnreadCount();
 
-	void readTill(not_null<HistoryItem*> item);
-	void readTill(MsgId tillId);
+	void readTill(
+		not_null<HistoryItem*> item,
+		ReadMode mode = ReadMode::RespectSettings);
+	void readTill(
+		MsgId tillId,
+		ReadMode mode = ReadMode::RespectSettings);
 
 	void chatListPreloadData() override;
 	void paintUserpic(
@@ -148,9 +153,12 @@ private:
 
 	void changeUnreadCountByMessage(MsgId id, int delta);
 	void setUnreadCount(std::optional<int> count);
-	void readTill(MsgId tillId, HistoryItem *tillIdItem);
+	void readTill(
+		MsgId tillId,
+		HistoryItem *tillIdItem,
+		ReadMode mode);
 	void checkReadTillEnd();
-	void sendReadTillRequest();
+	void sendReadTillRequest(ReadMode mode);
 	void reloadUnreadCountIfNeeded();
 
 	[[nodiscard]] bool buildFromData(not_null<Viewer*> viewer);

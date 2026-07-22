@@ -385,8 +385,8 @@ void ForumTopic::subscribeToUnreadChanges() {
 	}, _lifetime);
 }
 
-void ForumTopic::readTillEnd() {
-	_replies->readTill(_lastKnownServerMessageId);
+void ForumTopic::readTillEnd(ReadMode mode) {
+	_replies->readTill(_lastKnownServerMessageId, mode);
 }
 
 void ForumTopic::applyTopic(const MTPDforumTopic &data) {
