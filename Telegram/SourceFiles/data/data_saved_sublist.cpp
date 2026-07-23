@@ -755,6 +755,7 @@ void SavedSublist::sendReadTillRequest(ReadMode mode) {
 			mtpRequestId requestId) {
 		if (_readRequestId == requestId) {
 			_readRequestId = 0;
+			_sentReadTill = 0;
 		}
 	})).send();
 }

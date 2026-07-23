@@ -612,7 +612,7 @@ void Histories::changeDialogUnreadMark(
 		bool unread,
 		ReadMode mode) {
 	history->setUnreadMark(unread);
-	if (!ReadRequestAllowed(&session(), mode)) {
+	if (!unread && !ReadRequestAllowed(&session(), mode)) {
 		return;
 	}
 
@@ -633,7 +633,7 @@ void Histories::changeSublistUnreadMark(
 		return;
 	}
 	sublist->setUnreadMark(unread);
-	if (!ReadRequestAllowed(&session(), mode)) {
+	if (!unread && !ReadRequestAllowed(&session(), mode)) {
 		return;
 	}
 
