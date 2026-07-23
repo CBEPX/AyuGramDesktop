@@ -74,14 +74,7 @@ void map(not_null<HistoryItem*> item, AyuMessageBase &message) {
 	message.text = serializedText.first;
 	message.textEntities = serializedText.second;
 
-	// todo: implement mapping
-	message.mediaPath = "/";
-	// message.hqThumbPath
-	message.documentType = 0; // document type none
-	// message.documentSerialized
-	// message.thumbsSerialized
-	// message.documentAttributesSerialized
-	// message.mimeType
+	AyuMapper::mapMediaToMessage(item, message);
 }
 
 void addEditedMessage(not_null<HistoryItem *> item) {
@@ -115,7 +108,7 @@ void addDeletedMessage(not_null<HistoryItem*> item) {
 	DeletedMessage message;
 	map(item, message);
 
-	if (message.text.empty()) {
+	if (message.text.empty() && !AyuMapper::hasStoredMedia(message)) {
 		return;
 	}
 

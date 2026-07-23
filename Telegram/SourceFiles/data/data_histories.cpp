@@ -1136,6 +1136,13 @@ void Histories::deleteMessages(const MessageIdsList &ids, bool revoke) {
 		document->owner().savedMusic().remove(document);
 	}
 
+	for (const auto &item : remove) {
+		if (item->isRegular()
+			&& !item->isDeleted()
+			&& isMessageSavable(item)) {
+			AyuMessages::addDeletedMessage(item);
+		}
+	}
 	if (!remove.empty()) {
 		_owner->notifyItemsAboutToBeDestroyed(remove);
 	}
