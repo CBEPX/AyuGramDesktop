@@ -7,6 +7,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "chat_helpers/emoji_interactions.h"
 
+#include "ayu/ayu_settings.h"
 #include "chat_helpers/stickers_emoji_pack.h"
 #include "history/history_item.h"
 #include "history/history.h"
@@ -307,6 +308,10 @@ void EmojiInteractions::sendAccumulatedOutgoing(
 	const auto till = ranges::find_if(animations, [&](const auto &animation) {
 		return !animation.startedAt || (animation.startedAt >= intervalEnd);
 	});
+	if (!AyuSettings::ghost(_session).sendUploadProgress()) {
+		animations.erase(from, till);
+		return;
+	}
 	auto bunch = EmojiInteractionsBunch();
 	bunch.interactions.reserve(till - from);
 	for (const auto &animation : ranges::make_subrange(from, till)) {
@@ -471,6 +476,9 @@ void EmojiInteractions::setWaitingForDownload(bool waiting) {
 }
 
 void EmojiInteractions::playStarted(not_null<PeerData*> peer, QString emoji) {
+	if (!AyuSettings::ghost(_session).sendUploadProgress()) {
+		return;
+	}
 	auto &map = _playStarted[peer];
 	const auto i = map.find(emoji);
 	const auto now = crl::now();
