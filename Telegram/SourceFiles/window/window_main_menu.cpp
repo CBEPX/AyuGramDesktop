@@ -768,33 +768,16 @@ void MainMenu::setupMenu() {
 			addAction(
 				tr::ayu_LReadMessages(),
 				{&st::ayuLReadMenuIcon}
-			)->setClickedCallback([=]() mutable
-			{
-				auto &ghost = AyuSettings::ghost(&controller->session());
-				const auto prev = ghost.sendReadMessages();
-				ghost.setSendReadMessages(false);
-
+			)->setClickedCallback([=] {
 				const auto chats = controller->session().data().chatsList();
-				MarkAsReadChatList(chats);
-
-				ghost.setSendReadMessages(prev);
+				MarkAsReadChatList(chats, Data::ReadMode::LocalOnly);
 			});
 		}
 
 		if (settings.showSReadToggleInDrawer()) {
-			auto callback = [=](Fn<void()> &&close) mutable {
-				auto &ghost = AyuSettings::ghost(&controller->session());
-				const auto prev = ghost.sendReadMessages();
-				ghost.setSendReadMessages(true);
-
-				auto chats = controller->session().data().chatsList();
-				MarkAsReadChatList(chats);
-
-				// slight delay for forums to send packets
-				dispatchToMainThread(crl::guard(controller, [=] {
-					auto &ghost = AyuSettings::ghost(&controller->session());
-					ghost.setSendReadMessages(prev);
-				}), 200);
+			auto callback = [=](Fn<void()> &&close) {
+				const auto chats = controller->session().data().chatsList();
+				MarkAsReadChatList(chats, Data::ReadMode::ForceSend);
 				close();
 			};
 

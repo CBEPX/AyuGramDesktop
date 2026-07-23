@@ -11,6 +11,7 @@
 #include "ayu/utils/rc_manager.h"
 #include "core/application.h"
 #include "data/data_media_types.h"
+#include "data/data_types.h"
 #include "dialogs/dialogs_main_list.h"
 #include "info/profile/info_profile_badge.h"
 
@@ -70,8 +71,12 @@ Fn<void()> badgeClickHandler(not_null<PeerData *> peer);
 
 bool isMessageHidden(not_null<HistoryItem*> item);
 
-void MarkAsReadChatList(not_null<Dialogs::MainList*> list);
-void MarkAsReadThread(not_null<Data::Thread*> thread);
+void MarkAsReadChatList(
+	not_null<Dialogs::MainList*> list,
+	Data::ReadMode mode = Data::ReadMode::RespectSettings);
+void MarkAsReadThread(
+	not_null<Data::Thread*> thread,
+	Data::ReadMode mode = Data::ReadMode::RespectSettings);
 
 void markReadAfterAction(not_null<History*> history);
 void readHistory(not_null<HistoryItem*> message);

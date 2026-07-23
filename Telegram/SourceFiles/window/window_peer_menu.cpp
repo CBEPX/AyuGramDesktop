@@ -244,10 +244,10 @@ void SetActionText(not_null<QAction*> action, rpl::producer<QString> &&text) {
 }
 
 void MarkAsReadChatList(not_null<Dialogs::MainList*> list) {
-	auto mark = std::vector<not_null<History*>>();
+	auto mark = std::vector<not_null<Data::Thread*>>();
 	for (const auto &row : list->indexed()->all()) {
-		if (const auto history = row->history()) {
-			mark.push_back(history);
+		if (const auto thread = row->thread()) {
+			mark.push_back(thread);
 		}
 	}
 	ranges::for_each(mark, MarkAsReadThread);
