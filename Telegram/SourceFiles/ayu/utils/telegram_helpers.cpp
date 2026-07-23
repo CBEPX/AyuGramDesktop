@@ -301,17 +301,23 @@ bool isMessageHidden(const not_null<HistoryItem*> item) {
 	return FiltersController::filtered(item);
 }
 
-void MarkAsReadChatList(not_null<Dialogs::MainList*> list) {
-	auto mark = std::vector<not_null<History*>>();
+void MarkAsReadChatList(
+		not_null<Dialogs::MainList*> list,
+		Data::ReadMode mode) {
+	auto mark = std::vector<not_null<Data::Thread*>>();
 	for (const auto &row : list->indexed()->all()) {
-		if (const auto history = row->history()) {
-			mark.push_back(history);
+		if (const auto thread = row->thread()) {
+			mark.push_back(thread);
 		}
 	}
-	ranges::for_each(mark, MarkAsReadThread);
+	ranges::for_each(mark, [=](not_null<Data::Thread*> thread) {
+		MarkAsReadThread(thread, mode);
+	});
 }
 
-void readMentions(base::weak_ptr<Data::Thread> weakThread) {
+void readMentions(
+		base::weak_ptr<Data::Thread> weakThread,
+		Data::ReadMode mode) {
 	const auto thread = weakThread.get();
 	if (!thread) {
 		return;
@@ -319,6 +325,15 @@ void readMentions(base::weak_ptr<Data::Thread> weakThread) {
 	const auto peer = thread->peer();
 	const auto topic = thread->asTopic();
 	const auto rootId = topic ? topic->rootId() : 0;
+	peer->owner().history(peer)->clearUnreadMentionsFor(rootId);
+	if (mode == Data::ReadMode::LocalOnly) {
+		return;
+	}
+	const auto &ghost = AyuSettings::ghost(&thread->session());
+	if (mode == Data::ReadMode::RespectSettings
+		&& !ghost.sendReadMessages()) {
+		return;
+	}
 	using Flag = MTPmessages_ReadMentions::Flag;
 	peer->session().api().request(MTPmessages_ReadMentions(
 		MTP_flags(rootId ? Flag::f_top_msg_id : Flag()),
@@ -330,14 +345,14 @@ void readMentions(base::weak_ptr<Data::Thread> weakThread) {
 			peer,
 			result);
 		if (offset > 0) {
-			readMentions(weakThread);
-		} else {
-			peer->owner().history(peer)->clearUnreadMentionsFor(rootId);
+			readMentions(weakThread, mode);
 		}
 	}).send();
 }
 
-void readReactions(base::weak_ptr<Data::Thread> weakThread) {
+void readReactions(
+		base::weak_ptr<Data::Thread> weakThread,
+		Data::ReadMode mode) {
 	const auto thread = weakThread.get();
 	if (!thread) {
 		return;
@@ -346,6 +361,15 @@ void readReactions(base::weak_ptr<Data::Thread> weakThread) {
 	const auto sublist = thread->asSublist();
 	const auto peer = thread->peer();
 	const auto rootId = topic ? topic->rootId() : 0;
+	peer->owner().history(peer)->clearUnreadReactionsFor(rootId, sublist);
+	if (mode == Data::ReadMode::LocalOnly) {
+		return;
+	}
+	const auto &ghost = AyuSettings::ghost(&thread->session());
+	if (mode == Data::ReadMode::RespectSettings
+		&& !ghost.sendReadMessages()) {
+		return;
+	}
 	using Flag = MTPmessages_ReadReactions::Flag;
 	peer->session().api().request(MTPmessages_ReadReactions(
 		MTP_flags(rootId ? Flag::f_top_msg_id : Flag(0)),
@@ -358,55 +382,47 @@ void readReactions(base::weak_ptr<Data::Thread> weakThread) {
 			peer,
 			result);
 		if (offset > 0) {
-			readReactions(weakThread);
-		} else {
-			peer->owner().history(peer)->clearUnreadReactionsFor(rootId, sublist);
+			readReactions(weakThread, mode);
 		}
 	}).send();
 }
 
-void MarkAsReadThread(not_null<Data::Thread*> thread) {
-	const auto readHistoryNative = [&](const not_null<History*> history)
-	{
-		history->owner().histories().readInbox(history);
-	};
-	const auto sendReadMentions = [=](
-		const not_null<Data::Thread*> threadInner)
-	{
-		readMentions(base::make_weak(threadInner));
-	};
-	const auto sendReadReactions = [=](
-		const not_null<Data::Thread*> threadInner)
-	{
-		readReactions(base::make_weak(threadInner));
+void MarkAsReadThread(
+		not_null<Data::Thread*> thread,
+		Data::ReadMode mode) {
+	const auto readHistoryNative = [=](not_null<History*> history) {
+		history->owner().histories().readInbox(history, mode);
 	};
 
 	if (thread->chatListBadgesState().unread) {
 		if (const auto forum = thread->asForum()) {
-			forum->enumerateTopics([](
-				not_null<Data::ForumTopic*> topic)
-				{
-					MarkAsReadThread(topic);
-				});
+			forum->enumerateTopics([=](
+					not_null<Data::ForumTopic*> topic) {
+				MarkAsReadThread(topic, mode);
+			});
 		} else if (const auto topic = thread->asTopic()) {
-			topic->readTillEnd();
+			topic->readTillEnd(mode);
 		} else if (const auto history = thread->asHistory()) {
 			readHistoryNative(history);
 			if (const auto migrated = history->migrateSibling()) {
 				readHistoryNative(migrated);
 			}
+		} else if (const auto sublist = thread->asSublist()) {
+			sublist->readTillEnd(mode);
 		}
 	}
 
 	if (thread->unreadMentions().has()) {
-		sendReadMentions(thread);
+		readMentions(base::make_weak(thread), mode);
 	}
 
 	if (thread->unreadReactions().has()) {
-		sendReadReactions(thread);
+		readReactions(base::make_weak(thread), mode);
 	}
 
-	AyuWorker::markAsOnline(&thread->session());
+	if (mode != Data::ReadMode::LocalOnly) {
+		AyuWorker::markAsOnline(&thread->session());
+	}
 }
 
 void readHistory(not_null<HistoryItem*> message) {
@@ -438,11 +454,15 @@ void readHistory(not_null<HistoryItem*> message) {
 					 });
 
 	if (history->unreadMentions().has()) {
-		readMentions(history->asThread());
+		readMentions(
+			history->asThread(),
+			Data::ReadMode::ForceSend);
 	}
 
 	if (history->unreadReactions().has()) {
-		readReactions(history->asThread());
+		readReactions(
+			history->asThread(),
+			Data::ReadMode::ForceSend);
 	}
 }
 
