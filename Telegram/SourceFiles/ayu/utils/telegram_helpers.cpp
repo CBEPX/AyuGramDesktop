@@ -325,13 +325,11 @@ void readMentions(
 	const auto peer = thread->peer();
 	const auto topic = thread->asTopic();
 	const auto rootId = topic ? topic->rootId() : 0;
-	peer->owner().history(peer)->clearUnreadMentionsFor(rootId);
-	if (mode == Data::ReadMode::LocalOnly) {
-		return;
-	}
 	const auto &ghost = AyuSettings::ghost(&thread->session());
-	if (mode == Data::ReadMode::RespectSettings
-		&& !ghost.sendReadMessages()) {
+	if (mode == Data::ReadMode::LocalOnly
+		|| (mode == Data::ReadMode::RespectSettings
+			&& !ghost.sendReadMessages())) {
+		peer->owner().history(peer)->clearUnreadMentionsFor(rootId);
 		return;
 	}
 	using Flag = MTPmessages_ReadMentions::Flag;
@@ -346,6 +344,8 @@ void readMentions(
 			result);
 		if (offset > 0) {
 			readMentions(weakThread, mode);
+		} else {
+			peer->owner().history(peer)->clearUnreadMentionsFor(rootId);
 		}
 	}).send();
 }
@@ -361,13 +361,11 @@ void readReactions(
 	const auto sublist = thread->asSublist();
 	const auto peer = thread->peer();
 	const auto rootId = topic ? topic->rootId() : 0;
-	peer->owner().history(peer)->clearUnreadReactionsFor(rootId, sublist);
-	if (mode == Data::ReadMode::LocalOnly) {
-		return;
-	}
 	const auto &ghost = AyuSettings::ghost(&thread->session());
-	if (mode == Data::ReadMode::RespectSettings
-		&& !ghost.sendReadMessages()) {
+	if (mode == Data::ReadMode::LocalOnly
+		|| (mode == Data::ReadMode::RespectSettings
+			&& !ghost.sendReadMessages())) {
+		peer->owner().history(peer)->clearUnreadReactionsFor(rootId, sublist);
 		return;
 	}
 	using Flag = MTPmessages_ReadReactions::Flag;
@@ -383,6 +381,8 @@ void readReactions(
 			result);
 		if (offset > 0) {
 			readReactions(weakThread, mode);
+		} else {
+			peer->owner().history(peer)->clearUnreadReactionsFor(rootId, sublist);
 		}
 	}).send();
 }
