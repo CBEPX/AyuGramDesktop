@@ -686,11 +686,14 @@ void History::destroyMessage(not_null<HistoryItem*> item) {
 			if (const auto messages = _messages.get()) {
 				messages->removeOne(item->id);
 			}
-			if (const auto types = item->sharedMediaTypes()) {
-				session().storage().remove(Storage::SharedMediaRemoveOne(
-					peerId,
-					types,
-					item->id));
+			if (!item->isDeleted()) {
+				if (const auto types = item->sharedMediaTypes()) {
+					session().storage().remove(
+						Storage::SharedMediaRemoveOne(
+							peerId,
+							types,
+							item->id));
+				}
 			}
 		}
 		itemRemoved(item);

@@ -723,7 +723,6 @@ void SavedSublist::sendReadTillRequest(ReadMode mode) {
 	if (_readRequestTimer.isActive()) {
 		_readRequestTimer.cancel();
 	}
-	_sentReadTill = computeInboxReadTillFull();
 	if (mode == ReadMode::LocalOnly) {
 		return;
 	}
@@ -738,6 +737,7 @@ void SavedSublist::sendReadTillRequest(ReadMode mode) {
 	if (mode == ReadMode::RespectSettings && !ghost.sendReadMessages()) {
 		return;
 	}
+	_sentReadTill = computeInboxReadTillFull();
 	_readRequestId = api->request(MTPmessages_ReadSavedHistory(
 		parentChat->input(),
 		sublistPeer()->input(),
