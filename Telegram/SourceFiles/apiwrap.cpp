@@ -1457,13 +1457,11 @@ void ApiWrap::markContentsRead(
 		QVector<MTPint>>();
 	markedIds.reserve(items.size());
 	for (const auto &item : items) {
-		const auto passthrough = (item->isUnreadMention() || item->hasUnreadReaction()) && !item->isUnreadMedia();
-
 		if (!item->markContentsRead(true) || !item->isRegular()) {
 			continue;
 		}
 
-		if (!ghost.sendReadMessages() && !passthrough) {
+		if (!ghost.sendReadMessages()) {
 			continue;
 		}
 
@@ -1489,14 +1487,12 @@ void ApiWrap::markContentsRead(
 }
 
 void ApiWrap::markContentsRead(not_null<HistoryItem*> item) {
-	const auto passthrough = (item->isUnreadMention() || item->hasUnreadReaction()) && !item->isUnreadMedia();
-
 	if (!item->markContentsRead(true) || !item->isRegular()) {
 		return;
 	}
 
 	const auto &ghost = AyuSettings::ghost(&session());
-	if (!ghost.sendReadMessages() && !passthrough) {
+	if (!ghost.sendReadMessages()) {
 		return;
 	}
 
