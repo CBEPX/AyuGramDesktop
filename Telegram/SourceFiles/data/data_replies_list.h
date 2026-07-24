@@ -7,8 +7,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include "base/weak_ptr.h"
 #include "base/timer.h"
+#include "base/weak_ptr.h"
+#include "data/data_types.h"
 
 class History;
 
@@ -60,13 +61,21 @@ public:
 
 	void requestUnreadCount();
 
-	void readTill(not_null<HistoryItem*> item);
-	void readTill(MsgId tillId);
+	void readTill(
+		not_null<HistoryItem*> item,
+		ReadMode mode = ReadMode::RespectSettings);
+	void readTill(
+		MsgId tillId,
+		ReadMode mode = ReadMode::RespectSettings);
 
 	[[nodiscard]] bool canDeleteMyTopic() const;
 
 	[[nodiscard]] rpl::lifetime &lifetime() {
 		return _lifetime;
+	}
+
+	[[nodiscard]] HistoryItem *divider() const {
+		return _divider;
 	}
 
 private:
@@ -98,9 +107,12 @@ private:
 
 	void changeUnreadCountByPost(MsgId id, int delta);
 	void setUnreadCount(std::optional<int> count);
-	void readTill(MsgId tillId, HistoryItem *tillIdItem);
+	void readTill(
+		MsgId tillId,
+		HistoryItem *tillIdItem,
+		ReadMode mode);
 	void checkReadTillEnd();
-	void sendReadTillRequest();
+	void sendReadTillRequest(ReadMode mode);
 	void reloadUnreadCountIfNeeded();
 
 	const not_null<History*> _history;

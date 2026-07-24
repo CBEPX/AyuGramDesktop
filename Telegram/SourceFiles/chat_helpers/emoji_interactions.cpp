@@ -7,6 +7,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "chat_helpers/emoji_interactions.h"
 
+#include "ayu/ayu_settings.h"
 #include "chat_helpers/stickers_emoji_pack.h"
 #include "history/history_item.h"
 #include "history/history.h"
@@ -57,9 +58,11 @@ EmojiInteractions::EmojiInteractions(not_null<Main::Session*> session)
 		if (update.flags & Data::MessageUpdate::Flag::Destroyed) {
 			_outgoing.remove(update.item);
 			_incoming.remove(update.item);
+			_autoplay.remove(update.item);
 		} else if (update.flags & Data::MessageUpdate::Flag::Edited) {
 			checkEdition(update.item, _outgoing);
 			checkEdition(update.item, _incoming);
+			checkEdition(update.item, _autoplay);
 		}
 	}, _lifetime);
 }
@@ -117,6 +120,43 @@ void EmojiInteractions::startOutgoing(
 		.document = document,
 		.media = media,
 		.scheduledAt = now,
+		.index = index,
+	});
+	check(now);
+}
+
+void EmojiInteractions::startAutoplay(
+		not_null<const HistoryView::Element*> view) {
+	const auto item = view->data();
+	if (!item->isRegular() || !item->history()->peer->isUser()) {
+		return;
+	}
+	const auto &pack = _session->emojiStickersPack();
+	const auto emoticon = item->originalText().text;
+	const auto emoji = pack.chooseInteractionEmoji(emoticon);
+	if (!emoji) {
+		return;
+	}
+	const auto &list = pack.animationsForEmoji(emoji);
+	if (list.empty()) {
+		return;
+	}
+	auto &animations = _autoplay[item];
+	if (!animations.empty()) {
+		return;
+	}
+	const auto index = base::RandomIndex(int(list.size()));
+	const auto document = (begin(list) + index)->second;
+	const auto media = document->createMediaView();
+	media->checkStickerLarge();
+	const auto now = crl::now();
+	animations.push_back({
+		.emoticon = emoticon,
+		.emoji = emoji,
+		.document = document,
+		.media = media,
+		.scheduledAt = now,
+		.incoming = false,
 		.index = index,
 	});
 	check(now);
@@ -196,8 +236,10 @@ void EmojiInteractions::seenOutgoing(
 
 auto EmojiInteractions::checkAnimations(crl::time now) -> CheckResult {
 	return Combine(
-		checkAnimations(now, _outgoing),
-		checkAnimations(now, _incoming));
+		Combine(
+			checkAnimations(now, _outgoing),
+			checkAnimations(now, _incoming)),
+		checkAnimations(now, _autoplay));
 }
 
 auto EmojiInteractions::checkAnimations(
@@ -266,6 +308,10 @@ void EmojiInteractions::sendAccumulatedOutgoing(
 	const auto till = ranges::find_if(animations, [&](const auto &animation) {
 		return !animation.startedAt || (animation.startedAt >= intervalEnd);
 	});
+	if (!AyuSettings::ghost(_session).sendUploadProgress()) {
+		animations.erase(from, till);
+		return;
+	}
 	auto bunch = EmojiInteractionsBunch();
 	bunch.interactions.reserve(till - from);
 	for (const auto &animation : ranges::make_subrange(from, till)) {
@@ -332,6 +378,18 @@ auto EmojiInteractions::checkAccumulated(crl::time now) -> CheckResult {
 		clearAccumulatedIncoming(now, animations);
 		if (animations.empty()) {
 			i = _incoming.erase(i);
+			continue;
+		} else {
+			// Doesn't really matter when, just clear them finally.
+			nearest = std::min(nearest, now + kAccumulateDelay);
+		}
+		++i;
+	}
+	for (auto i = begin(_autoplay); i != end(_autoplay);) {
+		auto &animations = i->second;
+		clearAccumulatedIncoming(now, animations);
+		if (animations.empty()) {
+			i = _autoplay.erase(i);
 			continue;
 		} else {
 			// Doesn't really matter when, just clear them finally.
@@ -418,6 +476,9 @@ void EmojiInteractions::setWaitingForDownload(bool waiting) {
 }
 
 void EmojiInteractions::playStarted(not_null<PeerData*> peer, QString emoji) {
+	if (!AyuSettings::ghost(_session).sendUploadProgress()) {
+		return;
+	}
 	auto &map = _playStarted[peer];
 	const auto i = map.find(emoji);
 	const auto now = crl::now();

@@ -10,6 +10,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "api/api_text_entities.h"
 #include "data/business/data_shortcut_messages.h"
 #include "data/components/scheduled_messages.h"
+#include "data/notify/data_notify_settings.h"
 #include "data/data_channel.h"
 #include "data/data_chat.h"
 #include "data/data_document.h"
@@ -34,6 +35,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 // AyuGram includes
 #include "ayu/ayu_settings.h"
 #include "ayu/ayu_worker.h"
+#include "ayu/data/messages_storage.h"
 #include "ayu/utils/telegram_helpers.h"
 
 
@@ -42,6 +44,14 @@ namespace {
 
 constexpr auto kReadRequestTimeout = 3 * crl::time(1000);
 constexpr auto kReportDeliveriesPerRequest = 50;
+
+[[nodiscard]] bool ReadRequestAllowed(
+		not_null<Main::Session*> session,
+		ReadMode mode) {
+	return (mode == ReadMode::ForceSend)
+		|| ((mode == ReadMode::RespectSettings)
+			&& AyuSettings::ghost(session).sendReadMessages());
+}
 
 } // namespace
 
@@ -177,43 +187,75 @@ void Histories::clearAll() {
 	_map.clear();
 }
 
-void Histories::readInbox(not_null<History*> history) {
+void Histories::readInbox(
+		not_null<History*> history,
+		ReadMode mode) {
 	DEBUG_LOG(("Reading: readInbox called."));
 	if (history->lastServerMessageKnown()) {
 		const auto last = history->lastServerMessage();
 		DEBUG_LOG(("Reading: last known, reading till %1."
 			).arg(last ? last->id.bare : 0));
-		readInboxTill(history, last ? last->id : 0);
+		readInboxTill(history, last ? last->id : 0, mode);
 		return;
 	} else if (history->loadedAtBottom()) {
 		if (const auto lastId = history->maxMsgId()) {
 			DEBUG_LOG(("Reading: loaded at bottom, maxMsgId %1."
 				).arg(lastId.bare));
-			readInboxTill(history, lastId);
+			readInboxTill(history, lastId, mode);
 			return;
 		} else if (history->loadedAtTop()) {
 			DEBUG_LOG(("Reading: loaded at bottom, loaded at top."));
-			readInboxTill(history, 0);
+			readInboxTill(history, 0, mode);
 			return;
 		}
 		DEBUG_LOG(("Reading: loaded at bottom, but requesting entry."));
 	}
+	if (mode == ReadMode::LocalOnly) {
+		const auto last = history->lastServerMessage();
+		readInboxTill(
+			history,
+			last ? last->id : history->maxMsgId(),
+			mode);
+		return;
+	}
+	if (const auto channel = history->peer->asChannel()) {
+		if (channel->isCommunity()) {
+			return;
+		}
+	}
+	auto &state = _states[history];
+	if (!state.readInboxRequestGeneration
+		|| mode == ReadMode::ForceSend) {
+		state.readInboxRequestGeneration = ++_readInboxRequestGeneration;
+	}
+	const auto generation = state.readInboxRequestGeneration;
 	requestDialogEntry(history, [=] {
+		const auto state = lookup(history);
+		if (!state || state->readInboxRequestGeneration != generation) {
+			return;
+		}
+		state->readInboxRequestGeneration = 0;
 		Expects(history->lastServerMessageKnown());
 
 		const auto last = history->lastServerMessage();
 		DEBUG_LOG(("Reading: got entry, reading till %1."
 			).arg(last ? last->id.bare : 0));
-		readInboxTill(history, last ? last->id : 0);
+		readInboxTill(history, last ? last->id : 0, mode);
+		checkEmptyState(history);
 	});
 }
 
-void Histories::readInboxTill(not_null<HistoryItem*> item) {
+void Histories::readInboxTill(
+		not_null<HistoryItem*> item,
+		ReadMode mode) {
 	const auto history = item->history();
 	if (!item->isRegular()) {
 		readClientSideMessage(item);
 		auto view = item->mainView();
 		if (!view) {
+			if (mode == ReadMode::LocalOnly) {
+				readInboxTill(history, history->maxMsgId(), mode);
+			}
 			return;
 		}
 		auto block = view->block();
@@ -240,20 +282,27 @@ void Histories::readInboxTill(not_null<HistoryItem*> item) {
 		if (!item->isRegular()) {
 			LOG(("App Error: "
 				"Can't read history till unknown local message."));
+			if (mode == ReadMode::LocalOnly) {
+				readInboxTill(history, history->maxMsgId(), mode);
+			}
 			return;
 		}
 	}
-	readInboxTill(history, item->id);
-}
-
-void Histories::readInboxTill(not_null<History*> history, MsgId tillId) {
-	readInboxTill(history, tillId, false);
+	readInboxTill(history, item->id, mode);
 }
 
 void Histories::readInboxTill(
 		not_null<History*> history,
 		MsgId tillId,
-		bool force) {
+		ReadMode mode) {
+	readInboxTill(history, tillId, false, mode);
+}
+
+void Histories::readInboxTill(
+		not_null<History*> history,
+		MsgId tillId,
+		bool force,
+		ReadMode mode) {
 	Expects(IsServerMsgId(tillId) || (!tillId && !force));
 
 	DEBUG_LOG(("Reading: readInboxTill %1, force %2."
@@ -279,14 +328,44 @@ void Histories::readInboxTill(
 
 	Core::App().notifications().clearIncomingFromHistory(history);
 
-	const auto needsRequest = history->readInboxTillNeedsRequest(tillId);
-	if (!needsRequest && !force) {
+	const auto needsRequest = history->readInboxTillNeedsRequest(tillId, mode);
+	if (mode == ReadMode::LocalOnly) {
+		if (const auto state = lookup(history)) {
+			state->willReadTill = 0;
+			state->willReadWhen = 0;
+			state->readInboxRequestGeneration = 0;
+		}
+		updateReadRequestsTimer();
+		checkEmptyState(history);
+		if (!history->trackUnreadMessages()) {
+			return;
+		}
+		const auto stillUnread = history->countStillUnreadLocal(tillId);
+		history->setInboxReadTill(tillId);
+		if (stillUnread) {
+			history->setUnreadCount(*stillUnread);
+		}
+		history->updateChatListEntry();
+		return;
+	}
+	if (!needsRequest
+		&& !force
+		&& (mode != ReadMode::ForceSend || !IsServerMsgId(tillId))) {
 		DEBUG_LOG(("Reading: readInboxTill finish 1."));
 		return;
 	} else if (!history->trackUnreadMessages()) {
 		DEBUG_LOG(("Reading: readInboxTill finish 2."));
 		return;
 	}
+	const auto stillUnread = history->countStillUnreadLocal(tillId);
+	history->setInboxReadTill(tillId);
+	if (stillUnread) {
+		DEBUG_LOG(("Reading: marking now with till %1 and still %2"
+			).arg(tillId.bare
+			).arg(*stillUnread));
+		history->setUnreadCount(*stillUnread);
+	}
+	history->updateChatListEntry();
 	const auto maybeState = lookup(history);
 	if (maybeState && maybeState->sentReadTill >= tillId) {
 		DEBUG_LOG(("Reading: readInboxTill finish 3 with %1."
@@ -296,32 +375,44 @@ void Histories::readInboxTill(
 		DEBUG_LOG(("Reading: readInboxTill finish 4 with %1 and force %2."
 			).arg(maybeState->sentReadTill.bare
 			).arg(Logs::b(force)));
-		if (force) {
+		if (mode == ReadMode::ForceSend) {
+			maybeState->willReadWhen = 0;
+			sendReadRequest(history, *maybeState, mode);
+			updateReadRequestsTimer();
+		} else if (force) {
 			sendPendingReadInbox(history);
 		}
 		return;
 	} else if (!needsRequest
+		&& mode != ReadMode::ForceSend
 		&& (!maybeState || !maybeState->willReadTill)) {
 		return;
 	}
-	const auto stillUnread = history->countStillUnreadLocal(tillId);
 	if (!force
+		&& mode != ReadMode::ForceSend
 		&& stillUnread
 		&& history->unreadCountKnown()
 		&& *stillUnread == history->unreadCount()) {
 		DEBUG_LOG(("Reading: count didn't change so just update till %1"
 			).arg(tillId.bare));
-		history->setInboxReadTill(tillId);
 		return;
 	}
 	auto &state = maybeState ? *maybeState : _states[history];
 	state.willReadTill = tillId;
-	if (force || !stillUnread || !*stillUnread) {
+	if (force
+		|| mode == ReadMode::ForceSend
+		|| !stillUnread
+		|| !*stillUnread) {
 		DEBUG_LOG(("Reading: will read till %1 with still unread %2"
 			).arg(tillId.bare
 			).arg(stillUnread.value_or(-666)));
 		state.willReadWhen = 0;
-		sendReadRequests();
+		if (mode == ReadMode::ForceSend) {
+			sendReadRequest(history, state, mode);
+			updateReadRequestsTimer();
+		} else {
+			sendReadRequests();
+		}
 		if (!stillUnread) {
 			return;
 		}
@@ -336,19 +427,17 @@ void Histories::readInboxTill(
 		DEBUG_LOG(("Reading: will read till %1 postponed already"
 			).arg(tillId.bare));
 	}
-	DEBUG_LOG(("Reading: marking now with till %1 and still %2"
-		).arg(tillId.bare
-		).arg(*stillUnread));
-	history->setInboxReadTill(tillId);
-	history->setUnreadCount(*stillUnread);
-	history->updateChatListEntry();
 }
 
 void Histories::readInboxOnNewMessage(not_null<HistoryItem*> item) {
 	if (!item->isRegular()) {
 		readClientSideMessage(item);
 	} else {
-		readInboxTill(item->history(), item->id, true);
+		readInboxTill(
+			item->history(),
+			item->id,
+			true,
+			ReadMode::RespectSettings);
 	}
 }
 
@@ -385,6 +474,11 @@ void Histories::requestDialogEntry(not_null<Data::Folder*> folder) {
 void Histories::requestDialogEntry(
 		not_null<History*> history,
 		Fn<void()> callback) {
+	if (const auto channel = history->peer->asChannel()) {
+		if (channel->isCommunity()) {
+			return;
+		}
+	}
 	const auto i = _dialogRequests.find(history);
 	if (i != end(_dialogRequests)) {
 		if (callback) {
@@ -499,6 +593,15 @@ void Histories::applyPeerDialogs(const MTPmessages_PeerDialogs &dialogs) {
 		}, [&](const MTPDdialogFolder &data) {
 			const auto folder = _owner->processFolder(data.vfolder());
 			folder->applyDialog(data);
+		}, [&](const MTPDdialogCommunity &data) {
+			const auto channelId = ChannelId(data.vcommunity_id().v);
+			if (const auto channel = _owner->channelLoaded(channelId)) {
+				if (channel->isCommunity()) {
+					_owner->notifySettings().apply(
+						peerFromChannel(channelId),
+						data.vnotify_settings());
+				}
+			}
 		});
 	}
 	_owner->sendHistoryChangeNotifications();
@@ -506,8 +609,12 @@ void Histories::applyPeerDialogs(const MTPmessages_PeerDialogs &dialogs) {
 
 void Histories::changeDialogUnreadMark(
 		not_null<History*> history,
-		bool unread) {
+		bool unread,
+		ReadMode mode) {
 	history->setUnreadMark(unread);
+	if (!unread && !ReadRequestAllowed(&session(), mode)) {
+		return;
+	}
 
 	using Flag = MTPmessages_MarkDialogUnread::Flag;
 	session().api().request(MTPmessages_MarkDialogUnread(
@@ -519,12 +626,16 @@ void Histories::changeDialogUnreadMark(
 
 void Histories::changeSublistUnreadMark(
 		not_null<Data::SavedSublist*> sublist,
-		bool unread) {
+		bool unread,
+		ReadMode mode) {
 	const auto parent = sublist->parentChat();
 	if (!parent) {
 		return;
 	}
 	sublist->setUnreadMark(unread);
+	if (!unread && !ReadRequestAllowed(&session(), mode)) {
+		return;
+	}
 
 	using Flag = MTPmessages_MarkDialogUnread::Flag;
 	session().api().request(MTPmessages_MarkDialogUnread(
@@ -676,43 +787,46 @@ void Histories::reportPendingDeliveries() {
 	}
 }
 
-void Histories::sendReadRequests() {
-	DEBUG_LOG(("Reading: send requests with count %1.").arg(_states.size()));
-
-	// AyuGram sendReadMessages
-	const auto &ghost = AyuSettings::ghost(&_owner->session());
-	if (!ghost.sendReadMessages()) {
-		DEBUG_LOG(("[AyuGram] Don't read messages"));
-		_states.clear();
-		return;
-	}
-
-	if (_states.empty()) {
-		return;
-	}
-	const auto now = crl::now();
+void Histories::updateReadRequestsTimer() {
 	auto next = std::optional<crl::time>();
-	for (auto &[history, state] : _states) {
-		if (!state.willReadTill) {
-			DEBUG_LOG(("Reading: skipping zero till."));
-			continue;
-		} else if (state.willReadWhen <= now) {
-			DEBUG_LOG(("Reading: sending with till %1."
-				).arg(state.willReadTill.bare));
-			sendReadRequest(history, state);
-		} else if (!next || *next > state.willReadWhen) {
-			DEBUG_LOG(("Reading: scheduling for later send."));
+	for (const auto &[history, state] : _states) {
+		if (state.willReadTill
+			&& (!next || *next > state.willReadWhen)) {
 			next = state.willReadWhen;
 		}
 	}
-	if (next.has_value()) {
-		_readRequestsTimer.callOnce(*next - now);
+	if (next) {
+		_readRequestsTimer.callOnce(std::max(
+			crl::time(0),
+			*next - crl::now()));
 	} else {
 		_readRequestsTimer.cancel();
 	}
 }
 
-void Histories::sendReadRequest(not_null<History*> history, State &state) {
+void Histories::sendReadRequests() {
+	DEBUG_LOG(("Reading: send requests with count %1.").arg(_states.size()));
+
+	const auto now = crl::now();
+	for (auto &[history, state] : _states) {
+		if (!state.willReadTill) {
+			DEBUG_LOG(("Reading: skipping zero till."));
+		} else if (state.willReadWhen <= now) {
+			DEBUG_LOG(("Reading: sending with till %1."
+				).arg(state.willReadTill.bare));
+			sendReadRequest(history, state, ReadMode::RespectSettings);
+		} else {
+			DEBUG_LOG(("Reading: scheduling for later send."));
+		}
+	}
+	updateReadRequestsTimer();
+}
+
+void Histories::sendReadRequest(
+		not_null<History*> history,
+		State &state,
+		ReadMode mode) {
+	Expects(mode != ReadMode::LocalOnly);
 	Expects(state.willReadTill > state.sentReadTill);
 
 	const auto tillId = state.sentReadTill = base::take(state.willReadTill);
@@ -723,24 +837,37 @@ void Histories::sendReadRequest(not_null<History*> history, State &state) {
 	sendRequest(history, RequestType::ReadInbox, [=](Fn<void()> finish) {
 		DEBUG_LOG(("Reading: sending request invoked with till %1."
 			).arg(tillId.bare));
-		const auto finished = [=] {
-			auto state = lookup(history);
-			if (state == nullptr) {
-				// don’t care + didn’t ask + cry about it + who asked + stay mad + get real + L + bleed + mald seethe cope harder + dilate + incorrect + hoes mad + pound sand + basic skill issue + typo + ratio + ur dad left + you fell off + no u + the audacity + triggered + repelled + ur a minor + k. + any askers + get a life + ok and? + cringe + copium + go outside + touch grass + kick rocks + quote tweet + think again + not based + not funny didn’t laugh + social credits -999, 999, 999, 999 + get good + reported + ad hominem + ok boomer + small pp + ur allergic to sunlight + GG! + get rekt + trolled + your loss + muted + banned + kicked + permaban + useless + i slept with ur mom + yo momma + yo momma so fat + redpilled + no bitches allowed + i said it better + tiktok fan + get a life + unsubscribed + plundered + go tell reddit + donowalled + simp + get sticked bug LOL + talk nonsense + trump supporter + your’re a full time discord mod + you’re* + grammar issue + nerd + get clapped + kys + lorem ipsum dolor sit amet + go outside + bleach + lol + gay + retard + autistic + reported + ask deez + ez clap + straight cash + idgaf + ratio again + stay mad + read FAQ + youre lost + you “re” + stay pressed + reverse double take back + pedophile + cancelled + done for + don't give a damn + get a job + sus + baka + sussy baka + get blocked + mad free + freer than air + furry + rip bozo + you're a (insert stereotype) + slight_smile + aired + cringe again + Super Idol的笑容 + mad cuz bad + my pronouns are xe, xem & xyr + irrelevant + deal with it + screencapped your bio + karen/kyle + jealous + you're deaf + balls + i'll be right back + go ahead whine about it + not straight + eat paper + you lose + count to three + your problem + no one cares + log off + don't care even more + sex offender + sex defender + get religion + not okay + glhf + NFT owner + you make bad memes + problematic + fall in line + dog water + you look like a wall + you don’t know 2 + 2 with yo head ass + you are going to my cringe compilation + you can’t count to five + try again + you failed kindergarten + rickrolled + no lifer + guten freunden schickt man einen deutschen panzer + you have a anime profile picture + an* + fatherless + motherless + sisterless + brotherless + orphan + you can't catch this ratio + catch some bitches + I don't care about your opinion + genshin player + you dress like garbage + 日本語がお上手ですね + get fucked + you can’t understand what the word intelligence means with your dumb ass + you have hair + queued + put some thought into what you're going to do with that + stfu + go to bed + yes, i'm taller than you + i think your joke is funny + i rejected your mother's advances + marooned + you can’t read + I win + final ratio
-				state = &_states[history];
+		const auto release = [=] {
+			const auto state = lookup(history);
+			if (state && state->sentReadTill == tillId) {
+				state->sentReadTill = 0;
+				state->sentReadDone = false;
 			}
-
-			if (state->sentReadTill == tillId) {
-				state->sentReadDone = true;
+		};
+		if (!ReadRequestAllowed(&session(), mode)) {
+			release();
+			updateReadRequestsTimer();
+			crl::on_main(&session(), [=] { finish(); });
+			return 0;
+		}
+		const auto done = [=] {
+			auto &state = _states[history];
+			if (state.sentReadTill == tillId) {
+				state.sentReadDone = true;
 				if (history->unreadCountRefreshNeeded(tillId)) {
 					requestDialogEntry(history);
 				} else {
-					state->sentReadTill = 0;
+					state.sentReadTill = 0;
 				}
 			} else {
-				Assert(!state->sentReadTill || state->sentReadTill > tillId);
+				Assert(!state.sentReadTill || state.sentReadTill > tillId);
 			}
 			history->validateMonoAndForumUnread(tillId);
+			sendReadRequests();
+			finish();
+		};
+		const auto fail = [=] {
+			release();
 			sendReadRequests();
 			finish();
 		};
@@ -748,17 +875,15 @@ void Histories::sendReadRequest(not_null<History*> history, State &state) {
 			return session().api().request(MTPchannels_ReadHistory(
 				channel->inputChannel(),
 				MTP_int(tillId)
-			)).done(finished).fail(finished).send();
+			)).done(done).fail(fail).send();
 		} else {
 			return session().api().request(MTPmessages_ReadHistory(
 				history->peer->input(),
 				MTP_int(tillId)
 			)).done([=](const MTPmessages_AffectedMessages &result) {
 				session().api().applyAffectedMessages(history->peer, result);
-				finished();
-			}).fail([=] {
-				finished();
-			}).send();
+				done();
+			}).fail(fail).send();
 		}
 	});
 }
@@ -769,7 +894,8 @@ void Histories::checkEmptyState(not_null<History*> history) {
 			&& !state.postponedRequestEntry
 			&& state.sent.empty()
 			&& (state.willReadTill == 0)
-			&& (state.sentReadTill == 0);
+			&& (state.sentReadTill == 0)
+			&& (state.readInboxRequestGeneration == 0);
 	};
 	const auto i = _states.find(history);
 	if (i != end(_states) && empty(i->second)) {
@@ -1008,6 +1134,16 @@ void Histories::deleteMessages(const MessageIdsList &ids, bool revoke) {
 		document->owner().savedMusic().remove(document);
 	}
 
+	for (const auto &item : remove) {
+		if (item->isRegular()
+			&& !item->isDeleted()
+			&& isMessageSavable(item)) {
+			AyuMessages::addDeletedMessage(item);
+		}
+	}
+	if (!remove.empty()) {
+		_owner->notifyItemsAboutToBeDestroyed(remove);
+	}
 	for (const auto &item : remove) {
 		const auto history = item->history();
 		const auto wasLast = (history->lastMessage() == item);

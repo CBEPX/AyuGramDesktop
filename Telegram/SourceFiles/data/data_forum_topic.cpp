@@ -386,8 +386,8 @@ void ForumTopic::subscribeToUnreadChanges() {
 	}, _lifetime);
 }
 
-void ForumTopic::readTillEnd() {
-	_replies->readTill(_lastKnownServerMessageId);
+void ForumTopic::readTillEnd(ReadMode mode) {
+	_replies->readTill(_lastKnownServerMessageId, mode);
 }
 
 void ForumTopic::applyTopic(const MTPDforumTopic &data) {
@@ -807,7 +807,7 @@ void ForumTopic::applyIconId(DocumentId iconId) {
 	_iconId = iconId;
 	invalidateTitleWithIcon();
 	_icon = iconId
-		? std::make_unique<Ui::Text::LimitedLoopsEmoji>(
+		? MakeWrappedEmoji<Ui::Text::LimitedLoopsEmoji>(
 			owner().customEmojiManager().create(
 				_iconId,
 				[=] { updateChatListEntry(); },

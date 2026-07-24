@@ -6,13 +6,25 @@
 // Copyright @Radolyn, 2026
 #include "ayu/utils/ayu_mapper.h"
 
-#include "apiwrap.h"
 #include "api/api_text_entities.h"
+#include "apiwrap.h"
+#include "core/file_location.h"
+#include "data/stickers/data_stickers.h"
+#include "data/data_document.h"
+#include "data/data_media_types.h"
+#include "data/data_photo.h"
+#include "data/data_session.h"
 #include "history/history.h"
 #include "history/history_item.h"
 #include "history/history_item_components.h"
+#include "main/main_session.h"
 #include "mtproto/connection_abstract.h"
 #include "mtproto/details/mtproto_dump_to_text.h"
+#include "ui/image/image_location.h"
+
+#include <QtCore/QFileInfo>
+
+#include <cstring>
 
 namespace AyuMapper {
 
@@ -42,6 +54,383 @@ constexpr auto kMessageFlagIsPinned = 0x01000000;
 constexpr auto kMessageFlagHasTTL = 0x02000000;
 constexpr auto kMessageFlagInvertMedia = 0x08000000;
 constexpr auto kMessageFlagHasSavedPeer = 0x10000000;
+
+namespace {
+
+[[nodiscard]] std::optional<MTPstring> SizeTypeFromLocation(
+		const ImageLocation &location,
+		UserId self) {
+	const auto storage = std::get_if<StorageFileLocation>(
+		&location.file().data);
+	if (!storage || !storage->valid()) {
+		return std::nullopt;
+	}
+
+	auto result = std::optional<MTPstring>();
+	storage->tl(self).match([&](const MTPDinputPhotoFileLocation &data) {
+		if (!data.vthumb_size().v.isEmpty()) {
+			result = data.vthumb_size();
+		}
+	}, [&](const MTPDinputDocumentFileLocation &data) {
+		if (!data.vthumb_size().v.isEmpty()) {
+			result = data.vthumb_size();
+		}
+	}, [&](const auto &) {
+	});
+	return result;
+}
+
+[[nodiscard]] std::optional<MTPPhotoSize> PhotoSizeFromLocation(
+		const ImageLocation &location,
+		int byteSize,
+		UserId self) {
+	const auto type = SizeTypeFromLocation(location, self);
+	if (!type || location.width() <= 0 || location.height() <= 0) {
+		return std::nullopt;
+	}
+	return MTP_photoSize(
+		*type,
+		MTP_int(location.width()),
+		MTP_int(location.height()),
+		MTP_int(byteSize));
+}
+
+[[nodiscard]] std::optional<MTPVideoSize> VideoSizeFromLocation(
+		const ImageLocation &location,
+		int byteSize,
+		crl::time start,
+		UserId self) {
+	const auto type = SizeTypeFromLocation(location, self);
+	if (!type || location.width() <= 0 || location.height() <= 0) {
+		return std::nullopt;
+	}
+
+	using Flag = MTPDvideoSize::Flag;
+	auto flags = MTPDvideoSize::Flags();
+	if (start > 0) {
+		flags |= Flag::f_video_start_ts;
+	}
+	return MTP_videoSize(
+		MTP_flags(flags),
+		*type,
+		MTP_int(location.width()),
+		MTP_int(location.height()),
+		MTP_int(byteSize),
+		MTP_double(start / 1000.));
+}
+
+[[nodiscard]] QVector<MTPDocumentAttribute> DocumentAttributes(
+		not_null<DocumentData*> document) {
+	auto result = QVector<MTPDocumentAttribute>();
+	const auto filename = document->filename();
+	if (!filename.isEmpty()) {
+		result.push_back(MTP_documentAttributeFilename(MTP_string(filename)));
+	}
+
+	const auto dimensions = document->dimensions;
+	const auto sticker = document->sticker();
+	const auto hasVideoAttribute = document->isVideoFile()
+		|| document->isGifv()
+		|| document->isVideoMessage()
+		|| (sticker && sticker->isWebm());
+	if (hasVideoAttribute) {
+		using Flag = MTPDdocumentAttributeVideo::Flag;
+		auto flags = MTPDdocumentAttributeVideo::Flags();
+		if (document->isVideoMessage()) {
+			flags |= Flag::f_round_message;
+		}
+		if (document->supportsStreaming()) {
+			flags |= Flag::f_supports_streaming;
+		}
+		if (document->isSilentVideo()) {
+			flags |= Flag::f_nosound;
+		}
+		const auto preload = document->videoPreloadPrefix();
+		if (preload > 0) {
+			flags |= Flag::f_preload_prefix_size;
+		}
+		const auto video = document->video();
+		if (video && !video->codec.isEmpty()) {
+			flags |= Flag::f_video_codec;
+		}
+		result.push_back(MTP_documentAttributeVideo(
+			MTP_flags(flags),
+			MTP_double(document->duration() / 1000.),
+			MTP_int(dimensions.width()),
+			MTP_int(dimensions.height()),
+			MTP_int(preload),
+			MTPdouble(),
+			video ? MTP_string(video->codec) : MTPstring()));
+	} else if (dimensions.width() > 0 && dimensions.height() > 0) {
+		result.push_back(MTP_documentAttributeImageSize(
+			MTP_int(dimensions.width()),
+			MTP_int(dimensions.height())));
+	}
+
+	if (document->isAnimation()) {
+		result.push_back(MTP_documentAttributeAnimated());
+	}
+
+	if (sticker) {
+		if (sticker->setType == Data::StickersType::Emoji) {
+			using Flag = MTPDdocumentAttributeCustomEmoji::Flag;
+			auto flags = MTPDdocumentAttributeCustomEmoji::Flags();
+			if (!document->isPremiumEmoji()) {
+				flags |= Flag::f_free;
+			}
+			if (document->emojiUsesTextColor()) {
+				flags |= Flag::f_text_color;
+			}
+			result.push_back(MTP_documentAttributeCustomEmoji(
+				MTP_flags(flags),
+				MTP_string(sticker->alt),
+				Data::InputStickerSet(sticker->set)));
+		} else {
+			using Flag = MTPDdocumentAttributeSticker::Flag;
+			auto flags = MTPDdocumentAttributeSticker::Flags();
+			if (sticker->setType == Data::StickersType::Masks) {
+				flags |= Flag::f_mask;
+			}
+			result.push_back(MTP_documentAttributeSticker(
+				MTP_flags(flags),
+				MTP_string(sticker->alt),
+				Data::InputStickerSet(sticker->set),
+				MTPMaskCoords()));
+		}
+	} else if (const auto song = document->song()) {
+		using Flag = MTPDdocumentAttributeAudio::Flag;
+		auto flags = MTPDdocumentAttributeAudio::Flags();
+		if (!song->title.isEmpty()) {
+			flags |= Flag::f_title;
+		}
+		if (!song->performer.isEmpty()) {
+			flags |= Flag::f_performer;
+		}
+		result.push_back(MTP_documentAttributeAudio(
+			MTP_flags(flags),
+			MTP_int(document->duration() / 1000),
+			MTP_string(song->title),
+			MTP_string(song->performer),
+			MTPbytes()));
+	} else if (const auto voice = document->voice()) {
+		using Flag = MTPDdocumentAttributeAudio::Flag;
+		auto flags = MTPDdocumentAttributeAudio::Flags();
+		flags |= Flag::f_voice;
+		if (!voice->waveform.isEmpty()) {
+			flags |= Flag::f_waveform;
+		}
+		result.push_back(MTP_documentAttributeAudio(
+			MTP_flags(flags),
+			MTP_int(document->duration() / 1000),
+			MTPstring(),
+			MTPstring(),
+			voice->waveform.isEmpty()
+				? MTPbytes()
+				: MTP_bytes(documentWaveformEncode5bit(voice->waveform))));
+	}
+
+	if (document->hasAttachedStickers()) {
+		result.push_back(MTP_documentAttributeHasStickers());
+	}
+	return result;
+}
+
+[[nodiscard]] std::optional<MTPPhoto> PhotoFromData(
+		not_null<PhotoData*> photo,
+		UserId self) {
+	auto result = std::optional<MTPPhoto>();
+	photo->mtpInput().match([&](const MTPDinputPhoto &input) {
+		auto sizes = QVector<MTPPhotoSize>();
+		const auto inlineThumbnail = photo->inlineThumbnailBytes();
+		if (!inlineThumbnail.isEmpty()) {
+			sizes.push_back(MTP_photoStrippedSize(
+				MTP_string("i"),
+				MTP_bytes(inlineThumbnail)));
+		}
+
+		auto hasRegularSize = false;
+		for (const auto size : {
+				Data::PhotoSize::Small,
+				Data::PhotoSize::Thumbnail,
+				Data::PhotoSize::Large,
+			}) {
+			if (!photo->hasExact(size)) {
+				continue;
+			}
+			const auto mapped = PhotoSizeFromLocation(
+				photo->location(size),
+				photo->imageByteSize(size),
+				self);
+			if (mapped) {
+				sizes.push_back(*mapped);
+				hasRegularSize = true;
+			}
+		}
+		if (!hasRegularSize) {
+			return;
+		}
+
+		auto videoSizes = QVector<MTPVideoSize>();
+		if (photo->hasVideoSmall()) {
+			const auto mapped = VideoSizeFromLocation(
+				photo->videoLocation(Data::PhotoSize::Small),
+				photo->videoByteSize(Data::PhotoSize::Small),
+				photo->videoStartPosition(),
+				self);
+			if (mapped) {
+				videoSizes.push_back(*mapped);
+			}
+		}
+		if (photo->hasVideo()) {
+			const auto mapped = VideoSizeFromLocation(
+				photo->videoLocation(Data::PhotoSize::Large),
+				photo->videoByteSize(Data::PhotoSize::Large),
+				photo->videoStartPosition(),
+				self);
+			if (mapped) {
+				videoSizes.push_back(*mapped);
+			}
+		}
+
+		using Flag = MTPDphoto::Flag;
+		auto flags = MTPDphoto::Flags();
+		if (photo->hasAttachedStickers()) {
+			flags |= Flag::f_has_stickers;
+		}
+		if (!videoSizes.empty()) {
+			flags |= Flag::f_video_sizes;
+		}
+		result = MTP_photo(
+			MTP_flags(flags),
+			MTP_long(photo->id),
+			MTP_long(input.vaccess_hash().v),
+			MTP_bytes(input.vfile_reference().v),
+			MTP_int(photo->date()),
+			MTP_vector<MTPPhotoSize>(sizes),
+			MTP_vector<MTPVideoSize>(videoSizes),
+			MTP_int(photo->getDC()));
+	}, [&](const MTPDinputPhotoEmpty &) {
+	});
+	return result;
+}
+
+[[nodiscard]] std::optional<MTPDocument> DocumentFromData(
+		not_null<DocumentData*> document,
+		UserId self) {
+	if (!document->hasRemoteLocation()) {
+		return std::nullopt;
+	}
+
+	auto result = std::optional<MTPDocument>();
+	document->mtpInput().match([&](const MTPDinputDocument &input) {
+		auto thumbs = QVector<MTPPhotoSize>();
+		const auto inlineThumbnail = document->inlineThumbnailBytes();
+		if (!inlineThumbnail.isEmpty()) {
+			thumbs.push_back(document->inlineThumbnailIsPath()
+				? MTP_photoPathSize(
+					MTP_string("i"),
+					MTP_bytes(inlineThumbnail))
+				: MTP_photoStrippedSize(
+					MTP_string("i"),
+					MTP_bytes(inlineThumbnail)));
+		}
+		if (document->hasThumbnail()) {
+			const auto mapped = PhotoSizeFromLocation(
+				document->thumbnailLocation(),
+				document->thumbnailByteSize(),
+				self);
+			if (mapped) {
+				thumbs.push_back(*mapped);
+			}
+		}
+
+		auto videoThumbs = QVector<MTPVideoSize>();
+		if (document->hasVideoThumbnail()) {
+			const auto mapped = VideoSizeFromLocation(
+				document->videoThumbnailLocation(),
+				document->videoThumbnailByteSize(),
+				0,
+				self);
+			if (mapped) {
+				videoThumbs.push_back(*mapped);
+			}
+		}
+
+		using Flag = MTPDdocument::Flag;
+		auto flags = MTPDdocument::Flags();
+		if (!thumbs.empty()) {
+			flags |= Flag::f_thumbs;
+		}
+		if (!videoThumbs.empty()) {
+			flags |= Flag::f_video_thumbs;
+		}
+		result = MTP_document(
+			MTP_flags(flags),
+			MTP_long(document->id),
+			MTP_long(input.vaccess_hash().v),
+			MTP_bytes(input.vfile_reference().v),
+			MTP_int(document->date),
+			MTP_string(document->mimeString()),
+			MTP_long(document->size),
+			MTP_vector<MTPPhotoSize>(thumbs),
+			MTP_vector<MTPVideoSize>(videoThumbs),
+			MTP_int(document->getDC()),
+			MTP_vector<MTPDocumentAttribute>(
+				DocumentAttributes(document)));
+	}, [&](const MTPDinputDocumentEmpty &) {
+	});
+	return result;
+}
+
+void StoreMediaLocation(
+		const Core::FileLocation &location,
+		AyuMessageBase &message) {
+	if (location.isEmpty() || location.inMediaCache()) {
+		return;
+	}
+	const auto path = location.name();
+	const auto info = QFileInfo(path);
+	const auto checked = Core::FileLocation(path);
+	if (path == u"/"_q || !info.isFile() || !checked.check()) {
+		return;
+	}
+	message.mediaPath = path.toStdString();
+}
+
+template <typename Object>
+[[nodiscard]] std::optional<Object> ReadStoredMedia(
+		const std::vector<char> &serialized) {
+	if (serialized.empty()
+		|| (serialized.size() % sizeof(mtpPrime)) != 0) {
+		return std::nullopt;
+	}
+
+	auto buffer = mtpBuffer(serialized.size() / sizeof(mtpPrime));
+	std::memcpy(buffer.data(), serialized.data(), serialized.size());
+	const auto *from = buffer.data();
+	const auto *end = from + buffer.size();
+	auto object = Object();
+	return (object.read(from, end) && from == end)
+		? std::optional<Object>(std::move(object))
+		: std::nullopt;
+}
+
+template <typename Media>
+void RestoreMediaLocation(
+		const AyuMessageBase &message,
+		not_null<Media*> media) {
+	const auto path = QString::fromStdString(message.mediaPath);
+	if (path.isEmpty() || path == u"/"_q || !QFileInfo(path).isFile()) {
+		return;
+	}
+	const auto location = Core::FileLocation(path);
+	if (location.inMediaCache() || !location.check()) {
+		return;
+	}
+	media->setLocation(location);
+}
+
+} // namespace
 
 template<typename MTPObject>
 std::vector<char> serializeObject(MTPObject object) {
@@ -208,4 +597,97 @@ int mapItemFlagsToMTPFlags(not_null<HistoryItem*> item) {
 	return flags;
 }
 
+void mapMediaToMessage(
+		not_null<HistoryItem*> item,
+		AyuMessageBase &message) {
+	message.mediaPath.clear();
+	message.hqThumbPath.clear();
+	message.documentType = kDocumentTypeNone;
+	message.documentSerialized.clear();
+	message.thumbsSerialized.clear();
+	message.documentAttributesSerialized.clear();
+	message.mimeType.clear();
+
+	const auto media = item->media();
+	if (!media) {
+		return;
+	}
+	const auto self = item->history()->session().userId();
+	if (const auto photo = media->photo()) {
+		const auto stored = PhotoFromData(photo, self);
+		if (!stored) {
+			return;
+		}
+		message.documentType = kDocumentTypePhoto;
+		message.documentSerialized = serializeObject(*stored);
+		StoreMediaLocation(photo->location(true), message);
+	} else if (const auto document = media->document()) {
+		const auto stored = DocumentFromData(document, self);
+		if (!stored) {
+			return;
+		}
+		message.documentType = kDocumentTypeDocument;
+		message.documentSerialized = serializeObject(*stored);
+		message.mimeType = document->mimeString().toStdString();
+		StoreMediaLocation(document->location(true), message);
+	}
 }
+
+bool hasStoredMedia(const AyuMessageBase &message) {
+	return !message.documentSerialized.empty()
+		&& (message.documentType == kDocumentTypePhoto
+			|| message.documentType == kDocumentTypeDocument);
+}
+
+MTPMessageMedia mediaFromMessage(
+		const AyuMessageBase &message,
+		not_null<History*> history) {
+	if (!hasStoredMedia(message)) {
+		return MTP_messageMediaEmpty();
+	}
+
+	if (message.documentType == kDocumentTypePhoto) {
+		const auto stored = ReadStoredMedia<MTPPhoto>(
+			message.documentSerialized);
+		if (!stored || stored->type() != mtpc_photo) {
+			return MTP_messageMediaEmpty();
+		}
+		const auto photo = history->owner().processPhoto(*stored);
+		RestoreMediaLocation(message, photo);
+		return MTP_messageMediaPhoto(
+			MTP_flags(MTPDmessageMediaPhoto::Flag::f_photo),
+			*stored,
+			MTPint(),
+			MTPDocument());
+	}
+
+	const auto stored = ReadStoredMedia<MTPDocument>(
+		message.documentSerialized);
+	if (!stored || stored->type() != mtpc_document) {
+		return MTP_messageMediaEmpty();
+	}
+	const auto document = history->owner().processDocument(*stored);
+	RestoreMediaLocation(message, document);
+
+	using Flag = MTPDmessageMediaDocument::Flag;
+	auto flags = MTPDmessageMediaDocument::Flags();
+	flags |= Flag::f_document;
+	if (document->isVideoFile()) {
+		flags |= Flag::f_video;
+	}
+	if (document->isVideoMessage()) {
+		flags |= Flag::f_round;
+	}
+	if (document->isVoiceMessage()) {
+		flags |= Flag::f_voice;
+	}
+	return MTP_messageMediaDocument(
+		MTP_flags(flags),
+		*stored,
+		MTPVector<MTPDocument>(),
+		MTPPhoto(),
+		MTPint(),
+		MTPint());
+}
+
+} // namespace AyuMapper

@@ -74,6 +74,7 @@ void GenerateItems(
 		from = reinterpret_cast<PeerData*>(history->owner().chatLoaded(message.fromId));
 	}
 	const auto date = message.entityCreateDate;
+	auto media = AyuMapper::mediaFromMessage(message, history);
 	const auto addPart = [&](
 		not_null<HistoryItem*> item,
 		TimeId sentDate = 0,
@@ -106,7 +107,7 @@ void GenerateItems(
 																: QString("unknown user: %1").arg(message.fromId),
 									},
 									std::move(text),
-									MTP_messageMediaEmpty());
+									std::move(media));
 	};
 
 	const auto addSimpleTextMessage = [&](TextWithEntities &&text)
