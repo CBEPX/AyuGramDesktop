@@ -981,6 +981,11 @@ void SetupUnreadMentionsMenu(
 		const auto peer = thread->peer();
 		const auto topic = thread->asTopic();
 		const auto rootId = topic ? topic->rootId() : 0;
+		if (!AyuSettings::ghost(&thread->session()).sendReadMessages()) {
+			done();
+			peer->owner().history(peer)->clearUnreadMentionsFor(rootId);
+			return;
+		}
 		using Flag = MTPmessages_ReadMentions::Flag;
 		peer->session().api().request(MTPmessages_ReadMentions(
 			MTP_flags(rootId ? Flag::f_top_msg_id : Flag()),
@@ -1023,6 +1028,11 @@ void SetupUnreadReactionsMenu(
 		const auto sublist = thread->asSublist();
 		const auto peer = thread->peer();
 		const auto rootId = topic ? topic->rootId() : 0;
+		if (!AyuSettings::ghost(&thread->session()).sendReadMessages()) {
+			done();
+			peer->owner().history(peer)->clearUnreadReactionsFor(rootId, sublist);
+			return;
+		}
 		using Flag = MTPmessages_ReadReactions::Flag;
 		peer->session().api().request(MTPmessages_ReadReactions(
 			MTP_flags((rootId ? Flag::f_top_msg_id : Flag(0))
