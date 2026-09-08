@@ -1,0 +1,183 @@
+name: Windows x64 Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [port/v7.2.7]
+    paths:
+      - .github/workflows/windows-release.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Prepare build volume
+        run: |
+          git config --global core.longpaths true
+          $root = "$env:USERPROFILE\TBuild"
+          New-Item -ItemType Directory $root | Out-Null
+          New-Item -ItemType Junction -Path "$env:GITHUB_WORKSPACE\TBuild" -Target $root | Out-Null
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          submodules: recursive
+          persist-credentials: false
+          path: TBuild/tdesktop
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.10'
+
+      - name: Locate Windows toolchain
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.14.44.17.14.x86.x64 -property installationPath
+          if (!$vs) { throw 'MSVC 14.44 is required.' }
+          $sdk = "${env:ProgramFiles(x86)}\Windows Kits\10\Include\10.0.26100.0"
+          if (!(Test-Path $sdk)) { throw 'Windows SDK 10.0.26100.0 is required.' }
+          $toolset = Get-ChildItem "$vs\VC\Tools\MSVC" -Directory -Filter '14.44.*' | Sort-Object Name -Descending | Select-Object -First 1
+          if (!(Test-Path "$toolset\atlmfc\include\atlbase.h") -or !(Test-Path "$toolset\atlmfc\include\afx.h")) {
+            $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+            $process = Start-Process $installer -Wait -PassThru -ArgumentList @(
+              'modify', '--installPath', "`"$vs`"", '--quiet', '--norestart',
+              '--add', 'Microsoft.VisualStudio.Component.VC.14.44.17.14.ATL',
+              '--add', 'Microsoft.VisualStudio.Component.VC.14.44.17.14.MFC'
+            )
+            if ($process.ExitCode -notin @(0, 3010)) { throw "ATL/MFC installation failed: $($process.ExitCode)" }
+          }
+          if (!(Test-Path "$toolset\atlmfc\include\atlbase.h") -or !(Test-Path "$toolset\atlmfc\include\afx.h")) {
+            throw 'MSVC 14.44 ATL/MFC headers are required.'
+          }
+          "VS_PATH=$vs" >> $env:GITHUB_ENV
+          "TBUILD=$env:GITHUB_WORKSPACE\TBuild" >> $env:GITHUB_ENV
+          Get-Volume | Select-Object DriveLetter, SizeRemaining, Size
+          git config --global user.name 'CI build'
+          git config --global user.email 'ci@localhost'
+
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        id: tools
+        with:
+          path: TBuild/ThirdParty
+          key: windows-2025-msvc1444-py310-tools-${{ hashFiles('TBuild/tdesktop/Telegram/build/prepare/**', 'TBuild/tdesktop/Telegram/build/qt_version.py') }}
+
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        id: libs
+        with:
+          path: |
+            TBuild/Libraries/win64/*
+            !TBuild/Libraries/win64/[qQ]t[_-]*
+            !TBuild/Libraries/win64/cache_keys
+            TBuild/Libraries/win64/cache_keys/*
+            !TBuild/Libraries/win64/cache_keys/[qQ]t[_-]*
+          key: windows-2025-msvc1444-x64-libs-${{ hashFiles('TBuild/tdesktop/Telegram/build/prepare/**', 'TBuild/tdesktop/Telegram/build/qt_version.py') }}
+
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        id: qt
+        with:
+          path: |
+            TBuild/Libraries/win64/[qQ]t[_-]*
+            TBuild/Libraries/win64/cache_keys/[qQ]t[_-]*
+          key: windows-2025-msvc1444-x64-qt5-${{ hashFiles('TBuild/tdesktop/Telegram/build/prepare/**', 'TBuild/tdesktop/Telegram/build/qt_version.py') }}
+
+      - name: Prepare dependencies
+        shell: cmd
+        run: |
+          call "%VS_PATH%\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.44 10.0.26100.0
+          if errorlevel 1 exit /b %errorlevel%
+          call "%TBUILD%\tdesktop\Telegram\build\prepare\win.bat" silent
+          if errorlevel 1 exit /b %errorlevel%
+
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        if: steps.tools.outputs.cache-hit != 'true'
+        with:
+          path: TBuild/ThirdParty
+          key: ${{ steps.tools.outputs.cache-primary-key }}
+
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        if: steps.libs.outputs.cache-hit != 'true'
+        with:
+          path: |
+            TBuild/Libraries/win64/*
+            !TBuild/Libraries/win64/[qQ]t[_-]*
+            !TBuild/Libraries/win64/cache_keys
+            TBuild/Libraries/win64/cache_keys/*
+            !TBuild/Libraries/win64/cache_keys/[qQ]t[_-]*
+          key: ${{ steps.libs.outputs.cache-primary-key }}
+
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        if: steps.qt.outputs.cache-hit != 'true'
+        with:
+          path: |
+            TBuild/Libraries/win64/[qQ]t[_-]*
+            TBuild/Libraries/win64/cache_keys/[qQ]t[_-]*
+          key: ${{ steps.qt.outputs.cache-primary-key }}
+
+      - name: Build Release
+        shell: cmd
+        run: |
+          call "%VS_PATH%\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.44 10.0.26100.0
+          if errorlevel 1 exit /b %errorlevel%
+          cd /d "%TBUILD%\tdesktop\Telegram"
+          call configure.bat x64 -D TDESKTOP_API_TEST=ON -D CMAKE_CONFIGURATION_TYPES=Release -D CMAKE_SYSTEM_VERSION=10.0.26100.0 -D DESKTOP_APP_DISABLE_AUTOUPDATE=OFF
+          if errorlevel 1 exit /b %errorlevel%
+          cmake --build ..\out --config Release --target Telegram --parallel 4
+          if errorlevel 1 exit /b %errorlevel%
+
+      - name: Package application and provenance
+        run: |
+          $repo = "$env:TBUILD\tdesktop"
+          $output = "$repo\out\Release"
+          $package = "$env:GITHUB_WORKSPACE\package"
+          New-Item -ItemType Directory $package | Out-Null
+          foreach ($name in @('AyuGram.exe', 'Updater.exe')) {
+            $file = Join-Path $output $name
+            if (!(Test-Path $file)) { throw "Missing output: $name" }
+            Copy-Item $file $package
+          }
+          $dlls = Get-ChildItem $output -Filter '*.dll' -File
+          if ($dlls) { $dlls | Copy-Item -Destination $package }
+          $modules = & git -C $repo submodule status --recursive
+          if ($LASTEXITCODE) { throw 'Cannot read dependency revisions.' }
+          $head = & git -C $repo rev-parse HEAD
+          if ($LASTEXITCODE -or $head -ne $env:GITHUB_SHA) { throw 'Source revision mismatch.' }
+          $manifest = [ordered]@{
+            source = $head
+            repository = $env:GITHUB_REPOSITORY
+            run = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+            configuration = 'Release'
+            architecture = 'x64'
+            qt = '5.15.19'
+            msvc = '14.44'
+            sdk = '10.0.26100.0'
+            api_test = $true
+            runner_image = $env:ImageVersion
+            submodules = @($modules)
+            files = @(Get-ChildItem $package -File | ForEach-Object {
+              @{ name = $_.Name; sha256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower() }
+            })
+          }
+          $manifest | ConvertTo-Json -Depth 5 | Set-Content "$package\manifest.json" -Encoding utf8
+          New-Item -ItemType Directory artifacts | Out-Null
+          Compress-Archive "$package\*" 'artifacts\AyuGram-7.2.7-windows-x64-Release.zip'
+          $hash = (Get-FileHash 'artifacts\AyuGram-7.2.7-windows-x64-Release.zip' -Algorithm SHA256).Hash.ToLower()
+          "$hash  AyuGram-7.2.7-windows-x64-Release.zip" | Set-Content 'artifacts\SHA256SUMS' -Encoding utf8
+          Copy-Item "$package\manifest.json" artifacts
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: AyuGram-windows-x64-Release-${{ github.sha }}
+          path: artifacts/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
