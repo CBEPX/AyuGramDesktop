@@ -1,4 +1,4 @@
-import os, sys, pprint, re, json, pathlib, hashlib, subprocess, glob, tempfile
+import os, sys, pprint, re, json, pathlib, hashlib, subprocess, glob, tempfile, shlex
 
 executePath = os.getcwd()
 sys.dont_write_bytecode = True
@@ -1623,6 +1623,10 @@ mac:
         find "$PWD/../patches/qt6_highsierra" -maxdepth 1 -name "*.patch" -print0 | sort -z | xargs -0 git -C qtbase apply -v
     fi
     find $PWD/../patches/qtbase_$QT -type f -print0 | sort -z | xargs -0 git -C qtbase apply -v
+""" + ("""
+depends:""" + scriptPath + """/qtbase_6.11.2-cocoa-lifetime.patch
+    git -C qtbase apply """ + shlex.quote(scriptPath + '/qtbase_6.11.2-cocoa-lifetime.patch') + """
+""" if qt == '6.11.2' else '') + """
     sed -i.bak 's/tqtc-//' {qtimageformats,qtsvg}/dependencies.yaml
 
     CONFIGURATIONS=-debug

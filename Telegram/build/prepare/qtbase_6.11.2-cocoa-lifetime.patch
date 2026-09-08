@@ -1,0 +1,18 @@
+--- a/src/plugins/platforms/cocoa/qcocoawindow.mm
++++ b/src/plugins/platforms/cocoa/qcocoawindow.mm
+@@ -416,12 +416,12 @@
+     // expose delivery, modal sessions, AppKit ordering - which is free to
+     // destroy this window, and with it this QCocoaWindow. Everything after
+     // such a call would run on freed memory, starting with windowGeometry()
+-    // reading window()->geometry(). The QWindow is destroyed first, so a
+-    // stack QPointer to it detects the teardown without touching this.
++    // reading window()->geometry(). QWindow::destroy() can delete the
++    // platform window while keeping the QWindow itself alive, so guard this.
+     // QScopedValueRollback cannot be used for m_inSetVisible any more: its
+     // destructor writes through the reference unconditionally, commit() or
+     // not, so restore it through a guard that checks first.
+-    QPointer<QWindow> guard(window());
++    QPointer<QCocoaWindow> guard(this);
+     m_inSetVisible = true;
+     const auto inSetVisibleRollback = qScopeGuard([&] {
+         if (guard) {
