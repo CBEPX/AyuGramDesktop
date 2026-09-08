@@ -53,6 +53,7 @@ OVERLAY_SUBMODULES_DIR = "test-overlay-submodules"
 TEST_LOG_FILE = "test_log.txt"
 TEST_COMPLETE_MARKER = "TEST_COMPLETE"
 STALE_CRASH_DIR = "stale-crash"
+CRASHPAD_COMPLETED_DIR = "completed"
 BUILD_LOCK_PROCESS_NAMES = {
 	"cl.exe",
 	"cmake.exe",
@@ -1607,6 +1608,7 @@ def parse_test_log(text):
 	steps = []
 	passed = []
 	failed = []
+	skipped = []
 	screenshots = []
 	for line in text.splitlines():
 		if line.startswith("TEST_STEP: "):
@@ -1615,14 +1617,32 @@ def parse_test_log(text):
 			passed.append(line[len("TEST_RESULT: PASS: "):])
 		elif line.startswith("TEST_RESULT: FAIL: "):
 			failed.append(line[len("TEST_RESULT: FAIL: "):])
+		elif line.startswith("TEST_RESULT: N/A: "):
+			skipped.append(line[len("TEST_RESULT: N/A: "):])
 		elif line.startswith("SCREENSHOT: "):
 			screenshots.append(line[len("SCREENSHOT: "):])
 	return {
 		"steps": steps,
 		"pass": passed,
 		"fail": failed,
+		"skipped": skipped,
 		"screenshots": screenshots,
 	}
+
+
+def log_marks_complete(text):
+	# Whole-line match, never a substring. A line that merely contains the
+	# literal would otherwise end a live run: a note, stage name or check
+	# detail quoting the marker, or the permanent MTP seam's
+	# "rpc retry code=500 type=TEST_COMPLETE request=0x..." row, whose type
+	# comes straight from a server-sent rpc_error. Trailing whitespace is
+	# dropped so a stray space or a reader that leaves a CR still counts;
+	# leading whitespace is not, because Test::Complete() writes the marker
+	# flush left.
+	return any(
+		line.rstrip() == TEST_COMPLETE_MARKER
+		for line in text.splitlines()
+	)
 
 
 def tail_of_file(path, lines=60):
@@ -1673,6 +1693,10 @@ def command_test_run(args):
 	stderr_path = run_dir / "app_stderr.txt"
 	working = portable / PORTABLE_LIVE / "tdata" / "working"
 	dumps_dir = portable / PORTABLE_LIVE / "tdata" / "dumps"
+	completed_dir = dumps_dir / CRASHPAD_COMPLETED_DIR
+	completed_before = set(completed_dir.glob("*.dmp"))
+	dumps_before = set(dumps_dir.glob("*.dmp"))
+	working_before = working.stat().st_mtime_ns if working.is_file() else None
 
 	launched_at = time.time()
 	with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
@@ -1697,9 +1721,9 @@ def command_test_run(args):
 				last_change = now
 			complete = False
 			if size > 0:
-				complete = TEST_COMPLETE_MARKER in log_path.read_text(
+				complete = log_marks_complete(log_path.read_text(
 					encoding="utf-8", errors="replace"
-				)
+				))
 			if complete and complete_seen_at is None:
 				complete_seen_at = now
 			exit_code = process.poll()
@@ -1727,25 +1751,37 @@ def command_test_run(args):
 		if log_path.is_file()
 		else ""
 	)
-	test_complete = TEST_COMPLETE_MARKER in log_text
+	test_complete = log_marks_complete(log_text)
 	crash_report_fresh = (
 		working.is_file()
-		and working.stat().st_mtime >= launched_at
+		and working.stat().st_mtime_ns != working_before
 		and working.stat().st_size > 0
 	)
 	dumps = sorted(
-		str(path) for path in dumps_dir.glob("*.dmp")
-		if path.stat().st_mtime >= launched_at
+		str(path)
+		for path in set(dumps_dir.glob("*.dmp")) - dumps_before
 	) if dumps_dir.is_dir() else []
+	crashpad_dumps_added = sorted(
+		str(path)
+		for path in set(completed_dir.glob("*.dmp")) - completed_before
+	)
+	death_signals = []
+	if dumps:
+		death_signals.append("breakpad_dump")
+	if crashpad_dumps_added:
+		death_signals.append("crashpad_dump")
+	if outcome == "exited" and exit_code:
+		death_signals.append("exit_code")
+	after_complete = "died-after-complete" if death_signals else "complete"
 	if outcome == "exited":
 		if test_complete:
-			verdict_hint = "complete"
+			verdict_hint = after_complete
 		elif crash_report_fresh or dumps:
 			verdict_hint = "crash"
 		else:
 			verdict_hint = "died-without-complete"
 	elif outcome == "killed-after-complete":
-		verdict_hint = "complete"
+		verdict_hint = after_complete
 	else:
 		verdict_hint = "hang"
 
@@ -1758,6 +1794,8 @@ def command_test_run(args):
 			else None
 		),
 		"crash_report_fresh": crash_report_fresh,
+		"crashpad_dumps_added": crashpad_dumps_added,
+		"death_signals": death_signals,
 		"dumps": dumps,
 		"duration_seconds": round(ended_at - launched_at, 1),
 		"exe": str(exe),

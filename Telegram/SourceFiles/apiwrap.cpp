@@ -4307,6 +4307,7 @@ void ApiWrap::editMedia(
 		.album = nullptr,
 		.forceFile = forceFile,
 		.sendLargePhotos = file.sendLargePhotos,
+		.archive = file.archive,
 		.idOverride = 0,
 		.displayName = file.displayName,
 	}));
@@ -4381,6 +4382,7 @@ void ApiWrap::sendFiles(
 			.forceFile = forceFile,
 			.sendLargePhotos = file.sendLargePhotos,
 			.animationJob = file.animationJob,
+			.archive = file.archive,
 			.idOverride = 0,
 			.displayName = file.displayName,
 		}));

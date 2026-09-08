@@ -432,7 +432,8 @@ so it can never run against real account data. The overlay must:
 - Log through `test_log.h` (`Step`/`Pass`/`Fail`/`Check`/`Note`/`CheckNear`/`LogGeometry`) —
   it already writes the flushed absolute-path log and the exact `TEST_STEP` / `TEST_RESULT` /
   `SCREENSHOT` / `TEST_COMPLETE` markers the external runner parses. Never hand-roll marker
-  strings or log files.
+  strings or log files. The runner reads `TEST_COMPLETE` as a whole line, so a stage name, note
+  or check detail that quotes the marker inside a longer line is safe and never ends the run.
 - **Capture the target tightly** with `CaptureWidget`/`CaptureRect` — the specific widget /
   row / glyph, unambiguously in frame at usable resolution. A full-window grab that leaves the
   target clipped, off-screen, or thumbnail-sized is NOT acceptable evidence — if the target
@@ -521,7 +522,17 @@ bypass it with hand-built relative paths.
   from launch** and a quiet-log watchdog while polling `<EVIDENCE_DIR>/test_log.txt`, detects
   `TEST_COMPLETE` (success) versus process death (crash) versus the caps elapsing (hang), kills any
   straggler, and returns one JSON report with the parsed markers, stderr tail, fresh crash
-  diagnostics, and `stale_crash_cleared`. That field is an ordered list of `{from, kind, to}`
+  diagnostics, `crashpad_dumps_added`, `death_signals`, and `stale_crash_cleared`. The
+  completion marker is matched as a **whole log line** — a line equal to `TEST_COMPLETE` once
+  trailing whitespace is dropped — and never as a substring, so a line that merely quotes it,
+  such as `NOTE: mtp: rpc retry code=500 type=TEST_COMPLETE request=0x…`, is not a completion.
+  `TEST_COMPLETE` alone is not success: when the process writes it and then dies, the verdict is
+  `died-after-complete`, not `complete`, on any of three independent signals — a non-zero
+  `exit_code`, a new `.dmp` in the live `tdata/dumps/completed/` Crashpad database across the run,
+  or a fresh top-level `tdata/dumps/*.dmp` from a Breakpad build. `crashpad_dumps_added` is that
+  before/after delta, listed in full because `test-run` never clears `completed/` between runs;
+  `death_signals` names which of `"breakpad_dump"`, `"crashpad_dump"` and `"exit_code"` fired, and
+  is `[]` for a healthy run. `stale_crash_cleared` is an ordered list of `{from, kind, to}`
   entries whose `kind` is `"report"` or `"dump"`, and is `[]` when nothing was cleared. If the
   stale report cannot be moved, `test-run` refuses before launch, prints the helper error on stderr,
   exits non-zero, and emits no JSON. If a dump cannot be moved, `test-run` leaves it in place,

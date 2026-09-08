@@ -978,6 +978,23 @@ def run_test_run(exe, run_dir, **overrides):
 	return run_command(workspace.command_test_run, **arguments)
 
 
+def write_dump_after_complete_exe(path, dump, tail, windows_tail):
+	directory = dump.parent
+	return write_fake_exe(path, (
+		'LOG="$TDESKTOP_TEST_EVIDENCE_DIR/test_log.txt"\n'
+		'echo "TEST_COMPLETE" >> "$LOG"\n'
+		f'mkdir -p "{directory}"\n'
+		f'echo "MDMP fresh minidump" > "{dump}"\n'
+		+ tail
+	), (
+		'set "LOG=%TDESKTOP_TEST_EVIDENCE_DIR%\\test_log.txt"\n'
+		'echo TEST_COMPLETE>>"%LOG%"\n'
+		f'if not exist "{directory}" mkdir "{directory}"\n'
+		f'echo MDMP fresh minidump>"{dump}"\n'
+		+ windows_tail
+	))
+
+
 class MechanicsTest(unittest.TestCase):
 	def test_build_lock_recovery_selects_only_exact_owned_processes(self):
 		build = Path("C:/Telegram/twin/out")
@@ -988,7 +1005,7 @@ class MechanicsTest(unittest.TestCase):
 				"parent_pid": 1,
 				"name": "cmake.exe",
 				"executable": "C:/Tools/cmake.exe",
-				"command_line": "cmake --build C:/Telegram/twin/out",
+				"command_line": f"cmake --build {build.resolve()}",
 			},
 			{
 				"pid": 11,
@@ -1208,6 +1225,151 @@ class MechanicsTest(unittest.TestCase):
 			self.assertEqual(result["markers"]["screenshots"], ["/tmp/fake.png"])
 			self.assertFalse(result["crash_report_fresh"])
 
+	def test_parse_test_log_lists_skipped_rows_beside_pass_and_fail(self):
+		markers = workspace.parse_test_log("\n".join([
+			"TEST_STEP: gated stage self-test: arm",
+			"TEST_RESULT: N/A: skipped stage - applies=0",
+			"TEST_RESULT: PASS: applied stage - ran=1",
+			"TEST_RESULT: FAIL: other stage - ran=0",
+			"SCREENSHOT: /tmp/fake.png",
+		]))
+		self.assertEqual(markers["skipped"], ["skipped stage - applies=0"])
+		self.assertEqual(markers["pass"], ["applied stage - ran=1"])
+		self.assertEqual(markers["fail"], ["other stage - ran=0"])
+		self.assertEqual(markers["steps"], ["gated stage self-test: arm"])
+		self.assertEqual(markers["screenshots"], ["/tmp/fake.png"])
+
+	def test_log_marks_complete_reads_the_marker_as_a_whole_line(self):
+		for text in [
+			"TEST_COMPLETE",
+			"TEST_COMPLETE\n",
+			"TEST_COMPLETE\r\n",
+			"TEST_COMPLETE  ",
+			"TEST_STEP: open settings\nTEST_COMPLETE\n",
+			"NOTE: waiting\nTEST_COMPLETE",
+		]:
+			self.assertTrue(workspace.log_marks_complete(text), repr(text))
+		for text in [
+			"",
+			"NOTE: waiting for TEST_COMPLETE\n",
+			"NOTE: mtp: rpc retry code=500 type=TEST_COMPLETE "
+			"request=0x0000002d\n",
+			"TEST_COMPLETED\n",
+			"TEST_COMPLETE_LATER\n",
+			"  TEST_COMPLETE\n",
+			"TEST_RESULT: PASS: TEST_COMPLETE\n",
+		]:
+			self.assertFalse(workspace.log_marks_complete(text), repr(text))
+
+	def test_test_run_reports_a_death_after_complete(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			root = Path(temporary)
+			debug = make_portable_root(root)
+			exe = write_fake_exe(debug / "Telegram", (
+				'LOG="$TDESKTOP_TEST_EVIDENCE_DIR/test_log.txt"\n'
+				'echo "TEST_RESULT: PASS: row painted" >> "$LOG"\n'
+				'echo "TEST_COMPLETE" >> "$LOG"\n'
+				"exit 3\n"
+			), (
+				'set "LOG=%TDESKTOP_TEST_EVIDENCE_DIR%\\test_log.txt"\n'
+				'echo TEST_RESULT: PASS: row painted>>"%LOG%"\n'
+				'echo TEST_COMPLETE>>"%LOG%"\n'
+				"exit /b 3\n"
+			))
+			result = run_test_run(exe, root / "run1")
+			self.assertEqual(result["outcome"], "exited")
+			self.assertEqual(result["verdict_hint"], "died-after-complete")
+			self.assertTrue(result["test_complete"])
+			self.assertEqual(result["exit_code"], 3)
+			self.assertEqual(result["death_signals"], ["exit_code"])
+			self.assertEqual(result["crashpad_dumps_added"], [])
+			self.assertFalse(result["crash_report_fresh"])
+			self.assertEqual(result["dumps"], [])
+
+	def test_test_run_reports_both_death_signals_after_complete(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			root = Path(temporary).resolve()
+			debug = make_portable_root(root)
+			fresh = (
+				debug / workspace.PORTABLE_LIVE / "tdata" / "dumps"
+				/ workspace.CRASHPAD_COMPLETED_DIR / "both.dmp"
+			)
+			exe = write_dump_after_complete_exe(
+				debug / "Telegram", fresh, "exit 11\n", "exit /b 11\n",
+			)
+			result = run_test_run(exe, root / "run1")
+			self.assertEqual(result["verdict_hint"], "died-after-complete")
+			self.assertEqual(result["exit_code"], 11)
+			self.assertEqual(
+				result["death_signals"],
+				["crashpad_dump", "exit_code"],
+			)
+			self.assertEqual(result["crashpad_dumps_added"], [str(fresh)])
+
+	def test_test_run_counts_a_crashpad_dump_written_during_the_run(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			root = Path(temporary).resolve()
+			debug = make_portable_root(root)
+			fresh = (
+				debug / workspace.PORTABLE_LIVE / "tdata" / "dumps"
+				/ workspace.CRASHPAD_COMPLETED_DIR / "fresh.dmp"
+			)
+			exe = write_dump_after_complete_exe(
+				debug / "Telegram", fresh, "exit 0\n", "exit /b 0\n",
+			)
+			result = run_test_run(exe, root / "run1")
+			self.assertEqual(result["outcome"], "exited")
+			self.assertEqual(result["exit_code"], 0)
+			self.assertTrue(result["test_complete"])
+			self.assertEqual(result["verdict_hint"], "died-after-complete")
+			self.assertEqual(result["death_signals"], ["crashpad_dump"])
+			self.assertEqual(result["crashpad_dumps_added"], [str(fresh)])
+			self.assertEqual(result["dumps"], [])
+
+	def test_test_run_counts_a_breakpad_dump_written_during_the_run(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			root = Path(temporary).resolve()
+			debug = make_portable_root(root)
+			fresh = (
+				debug / workspace.PORTABLE_LIVE / "tdata" / "dumps"
+				/ "breakpad.dmp"
+			)
+			exe = write_dump_after_complete_exe(
+				debug / "Telegram", fresh, "exit 0\n", "exit /b 0\n",
+			)
+			result = run_test_run(exe, root / "run1")
+			self.assertEqual(result["outcome"], "exited")
+			self.assertEqual(result["exit_code"], 0)
+			self.assertTrue(result["test_complete"])
+			self.assertEqual(result["verdict_hint"], "died-after-complete")
+			self.assertEqual(result["death_signals"], ["breakpad_dump"])
+			self.assertEqual(result["dumps"], [str(fresh)])
+			self.assertEqual(result["crashpad_dumps_added"], [])
+
+	def test_test_run_ignores_a_crashpad_dump_from_before_the_run(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			root = Path(temporary).resolve()
+			debug = make_portable_root(root)
+			self.assertEqual(workspace.setup_test_account(debug), "fresh-copy")
+			completed = (
+				debug / workspace.PORTABLE_LIVE / "tdata" / "dumps"
+				/ workspace.CRASHPAD_COMPLETED_DIR
+			)
+			completed.mkdir(parents=True)
+			old = completed / "old.dmp"
+			old.write_bytes(b"MDMP old minidump\n")
+			exe = write_complete_markers_exe(debug / "Telegram")
+			run_dir = root / "run1"
+			result = run_test_run(exe, run_dir)
+			self.assertEqual(result["account"], "reused-marked-live")
+			self.assertEqual(result["verdict_hint"], "complete")
+			self.assertEqual(result["exit_code"], 0)
+			self.assertEqual(result["death_signals"], [])
+			self.assertEqual(result["crashpad_dumps_added"], [])
+			self.assertEqual(result["stale_crash_cleared"], [])
+			self.assertEqual(old.read_bytes(), b"MDMP old minidump\n")
+			self.assertFalse((run_dir / workspace.STALE_CRASH_DIR).exists())
+
 	def test_test_run_reports_crash_diagnostics(self):
 		with tempfile.TemporaryDirectory() as temporary:
 			root = Path(temporary)
@@ -1298,6 +1460,77 @@ class MechanicsTest(unittest.TestCase):
 			self.assertEqual(result["outcome"], "deadline-killed")
 			self.assertEqual(result["verdict_hint"], "hang")
 			self.assertFalse(result["test_complete"])
+
+	def test_test_run_keeps_a_grace_kill_complete(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			root = Path(temporary)
+			debug = make_portable_root(root)
+			exe = write_fake_exe(debug / "Telegram", (
+				'LOG="$TDESKTOP_TEST_EVIDENCE_DIR/test_log.txt"\n'
+				'echo "TEST_COMPLETE" >> "$LOG"\n'
+				"sleep 30\n"
+			), (
+				'set "LOG=%TDESKTOP_TEST_EVIDENCE_DIR%\\test_log.txt"\n'
+				'echo TEST_COMPLETE>>"%LOG%"\n'
+				":loop\ngoto loop\n"
+			))
+			result = run_test_run(exe, root / "run1", grace=1.0)
+			self.assertEqual(result["outcome"], "killed-after-complete")
+			self.assertEqual(result["verdict_hint"], "complete")
+			self.assertTrue(result["test_complete"])
+			self.assertIsNone(result["exit_code"])
+			self.assertEqual(result["death_signals"], [])
+
+	def test_test_run_refuses_a_line_that_only_contains_the_marker(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			root = Path(temporary)
+			debug = make_portable_root(root)
+			line = (
+				"NOTE: mtp: rpc retry code=500 type=TEST_COMPLETE"
+				" request=0x0000002d"
+			)
+			exe = write_fake_exe(debug / "Telegram", (
+				'LOG="$TDESKTOP_TEST_EVIDENCE_DIR/test_log.txt"\n'
+				f'echo "{line}" >> "$LOG"\n'
+				"sleep 30\n"
+			), (
+				'set "LOG=%TDESKTOP_TEST_EVIDENCE_DIR%\\test_log.txt"\n'
+				f'echo {line}>>"%LOG%"\n'
+				":loop\ngoto loop\n"
+			))
+			result = run_test_run(
+				exe, root / "run1", quiet=2.0, grace=1.0,
+			)
+			self.assertEqual(result["outcome"], "quiet-killed")
+			self.assertEqual(result["verdict_hint"], "hang")
+			self.assertFalse(result["test_complete"])
+			self.assertIsNone(result["exit_code"])
+			self.assertEqual(result["death_signals"], [])
+			self.assertEqual(
+				Path(result["log_path"]).read_text(
+					encoding="utf-8", errors="replace"
+				).splitlines(),
+				[line],
+			)
+
+	def test_test_run_reports_a_grace_kill_with_a_dump(self):
+		with tempfile.TemporaryDirectory() as temporary:
+			root = Path(temporary).resolve()
+			debug = make_portable_root(root)
+			dump = (
+				debug / workspace.PORTABLE_LIVE / "tdata" / "dumps"
+				/ workspace.CRASHPAD_COMPLETED_DIR / "grace.dmp"
+			)
+			exe = write_dump_after_complete_exe(
+				debug / "Telegram", dump, "sleep 30\n", ":loop\ngoto loop\n",
+			)
+			result = run_test_run(exe, root / "run1", grace=1.0)
+			self.assertEqual(result["outcome"], "killed-after-complete")
+			self.assertEqual(result["verdict_hint"], "died-after-complete")
+			self.assertTrue(result["test_complete"])
+			self.assertIsNone(result["exit_code"])
+			self.assertEqual(result["death_signals"], ["crashpad_dump"])
+			self.assertEqual(result["crashpad_dumps_added"], [str(dump)])
 
 	def test_test_run_clears_and_preserves_stale_crash_state(self):
 		with tempfile.TemporaryDirectory() as temporary:
@@ -1599,7 +1832,7 @@ class MechanicsTest(unittest.TestCase):
 			with mock.patch.object(
 				workspace, "task_action_config", return_value=(config, slot),
 			):
-				with self.assertRaisesRegex(workspace.WorkspaceError, "untracked"):
+				with self.assertRaisesRegex(workspace.WorkspaceError, "outside the overlay inventory"):
 					run_command(
 						workspace.command_overlay_save,
 						task=TASK_ID,
