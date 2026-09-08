@@ -695,9 +695,7 @@ void History::destroyMessage(not_null<HistoryItem*> item) {
 			if (const auto messages = _messages.get()) {
 				messages->removeOne(item->id);
 			}
-			if (!item->isDeleted()) {
-				item->removeFromSharedMediaIndex();
-			}
+			item->removeFromSharedMediaIndex();
 		}
 		itemRemoved(item);
 	}
