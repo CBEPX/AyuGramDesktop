@@ -370,7 +370,8 @@ void readReactions(
 	}
 	using Flag = MTPmessages_ReadReactions::Flag;
 	peer->session().api().request(MTPmessages_ReadReactions(
-		MTP_flags(rootId ? Flag::f_top_msg_id : Flag(0)),
+		MTP_flags((rootId ? Flag::f_top_msg_id : Flag(0))
+			| (sublist ? Flag::f_saved_peer_id : Flag(0))),
 		peer->input(),
 		MTP_int(rootId),
 		sublist ? sublist->sublistPeer()->input() : MTPInputPeer()
