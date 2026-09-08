@@ -359,6 +359,8 @@ void Histories::readInboxTill(
 		DEBUG_LOG(("Reading: readInboxTill finish 2."));
 		return;
 	}
+	const auto unreadCount = history->unreadCount();
+	const auto unreadCountKnown = history->unreadCountKnown();
 	const auto stillUnread = history->countStillUnreadLocal(tillId);
 	history->setInboxReadTill(tillId);
 	if (stillUnread) {
@@ -393,8 +395,8 @@ void Histories::readInboxTill(
 	if (!force
 		&& mode != ReadMode::ForceSend
 		&& stillUnread
-		&& history->unreadCountKnown()
-		&& *stillUnread == history->unreadCount()) {
+		&& unreadCountKnown
+		&& *stillUnread == unreadCount) {
 		DEBUG_LOG(("Reading: count didn't change so just update till %1"
 			).arg(tillId.bare));
 		return;
@@ -856,10 +858,11 @@ void Histories::sendReadRequest(
 			auto &state = _states[history];
 			if (state.sentReadTill == tillId) {
 				state.sentReadDone = true;
-				if (history->unreadCountRefreshNeeded(tillId)) {
-					requestDialogEntry(history);
-				} else {
+				if (const auto channel = history->peer->asChannel()
+				; channel && channel->isCommunity()) {
 					state.sentReadTill = 0;
+				} else {
+					requestDialogEntry(history);
 				}
 			} else {
 				Assert(!state.sentReadTill || state.sentReadTill > tillId);
