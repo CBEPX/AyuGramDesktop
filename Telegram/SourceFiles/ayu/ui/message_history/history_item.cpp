@@ -95,19 +95,25 @@ void GenerateItems(
 			flags |= MessageFlag::HasPostAuthor;
 		}
 
-		return history->makeMessage({
-										.id = history->nextNonHistoryEntryId(),
-										.flags = flags,
-										.from = from ? from->id : 0,
-										.date = date,
-										.postAuthor = !message.postAuthor.empty()
-														  ? QString::fromStdString(message.postAuthor)
-														  : from
-																? QString()
-																: QString("unknown user: %1").arg(message.fromId),
-									},
-									std::move(text),
-									std::move(media));
+		const auto fields = [&] {
+			return HistoryItemCommonFields{
+				.id = history->nextNonHistoryEntryId(),
+				.flags = flags,
+				.from = from ? from->id : 0,
+				.date = date,
+				.postAuthor = !message.postAuthor.empty()
+					? QString::fromStdString(message.postAuthor)
+					: from
+					? QString()
+					: u"unknown user: %1"_q.arg(message.fromId),
+			};
+		};
+		return v::match(media, [&](std::monostate) {
+			return history->makeMessage(
+				fields(), text, MTP_messageMediaEmpty());
+		}, [&](const auto &data) {
+			return history->makeMessage(fields(), data, text);
+		});
 	};
 
 	const auto addSimpleTextMessage = [&](TextWithEntities &&text)

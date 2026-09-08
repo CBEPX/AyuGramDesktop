@@ -639,55 +639,39 @@ bool hasStoredMedia(const AyuMessageBase &message) {
 			|| message.documentType == kDocumentTypeDocument);
 }
 
-MTPMessageMedia mediaFromMessage(
+StoredMedia mediaFromMessage(
 		const AyuMessageBase &message,
 		not_null<History*> history) {
 	if (!hasStoredMedia(message)) {
-		return MTP_messageMediaEmpty();
+		return std::monostate();
 	}
 
 	if (message.documentType == kDocumentTypePhoto) {
 		const auto stored = ReadStoredMedia<MTPPhoto>(
 			message.documentSerialized);
 		if (!stored || stored->type() != mtpc_photo) {
-			return MTP_messageMediaEmpty();
+			return std::monostate();
 		}
-		const auto photo = history->owner().processPhoto(*stored);
-		RestoreMediaLocation(message, photo);
-		return MTP_messageMediaPhoto(
-			MTP_flags(MTPDmessageMediaPhoto::Flag::f_photo),
-			*stored,
-			MTPint(),
-			MTPDocument());
+		const auto photo = history->owner().photo(stored->c_photo().vid().v);
+		if (!photo->date()) {
+			history->owner().processPhoto(*stored);
+			RestoreMediaLocation(message, photo);
+		}
+		return photo;
 	}
 
 	const auto stored = ReadStoredMedia<MTPDocument>(
 		message.documentSerialized);
 	if (!stored || stored->type() != mtpc_document) {
-		return MTP_messageMediaEmpty();
+		return std::monostate();
 	}
-	const auto document = history->owner().processDocument(*stored);
-	RestoreMediaLocation(message, document);
-
-	using Flag = MTPDmessageMediaDocument::Flag;
-	auto flags = MTPDmessageMediaDocument::Flags();
-	flags |= Flag::f_document;
-	if (document->isVideoFile()) {
-		flags |= Flag::f_video;
+	const auto document = history->owner().document(
+		stored->c_document().vid().v);
+	if (!document->date && !document->hasRemoteLocation()) {
+		history->owner().processDocument(*stored);
+		RestoreMediaLocation(message, document);
 	}
-	if (document->isVideoMessage()) {
-		flags |= Flag::f_round;
-	}
-	if (document->isVoiceMessage()) {
-		flags |= Flag::f_voice;
-	}
-	return MTP_messageMediaDocument(
-		MTP_flags(flags),
-		*stored,
-		MTPVector<MTPDocument>(),
-		MTPPhoto(),
-		MTPint(),
-		MTPint());
+	return document;
 }
 
 } // namespace AyuMapper

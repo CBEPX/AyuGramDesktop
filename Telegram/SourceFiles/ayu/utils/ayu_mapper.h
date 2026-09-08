@@ -8,6 +8,8 @@
 
 #include "ayu/data/entities.h"
 
+class PhotoData;
+class DocumentData;
 class History;
 class HistoryItem;
 
@@ -30,7 +32,12 @@ void mapMediaToMessage(
 	not_null<HistoryItem*> item,
 	AyuMessageBase &message);
 [[nodiscard]] bool hasStoredMedia(const AyuMessageBase &message);
-[[nodiscard]] MTPMessageMedia mediaFromMessage(
+using StoredMedia = std::variant<
+	std::monostate,
+	not_null<PhotoData*>,
+	not_null<DocumentData*>>;
+
+[[nodiscard]] StoredMedia mediaFromMessage(
 	const AyuMessageBase &message,
 	not_null<History*> history);
 
