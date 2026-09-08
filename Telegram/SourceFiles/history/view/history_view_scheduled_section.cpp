@@ -659,6 +659,18 @@ void ScheduledWidget::sendingFilesConfirmed(
 	if (showSendingFilesError(*bundle)) {
 		return;
 	}
+	if (!options.scheduled) {
+		const auto callback = [=](Api::SendOptions scheduled) {
+			sendingFilesConfirmed(bundle, scheduled);
+		};
+		controller()->show(PrepareScheduleBox(
+			this,
+			_show,
+			sendMenuDetails(),
+			callback,
+			options));
+		return;
+	}
 	const auto compress = bundle->way.sendImagesAsPhotos();
 	const auto type = compress ? SendMediaType::Photo : SendMediaType::File;
 	auto action = prepareSendAction(options);
