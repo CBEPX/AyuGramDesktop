@@ -81,7 +81,7 @@ void addEditedMessage(not_null<HistoryItem *> item) {
 	EditedMessage message;
 	map(item, message);
 
-	if (message.text.empty()) {
+	if (message.text.empty() && !AyuMapper::hasStoredMedia(message)) {
 		return;
 	}
 

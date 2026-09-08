@@ -3106,7 +3106,28 @@ void Session::updateEditedMessage(const MTPMessage &data) {
 		const auto unchanged = edit.richPage
 			? (Iv::FlattenRichPageSummary(edit.richPage) == msg)
 			: (edit.textWithEntities == msg);
-		if (unchanged || msg.empty()) {
+		const auto media = existing->media();
+		const auto photo = media ? media->photo() : nullptr;
+		const auto document = media ? media->document() : nullptr;
+		auto photoId = PhotoId();
+		auto documentId = DocumentId();
+		if (const auto incoming = data.c_message().vmedia()) {
+			incoming->match([&](const MTPDmessageMediaPhoto &data) {
+				const auto photo = data.vphoto();
+				if (photo && photo->type() == mtpc_photo) {
+					photoId = photo->c_photo().vid().v;
+				}
+			}, [&](const MTPDmessageMediaDocument &data) {
+				const auto document = data.vdocument();
+				if (document && document->type() == mtpc_document) {
+					documentId = document->c_document().vid().v;
+				}
+			}, [](const auto &) {
+			});
+		}
+		const auto mediaChanged = (photo ? photo->id : 0) != photoId
+			|| (document ? document->id : 0) != documentId;
+		if (unchanged && !mediaChanged) {
 			goto proceed;
 		}
 
