@@ -26,8 +26,11 @@ jobs:
         run: |
           git config --global core.longpaths true
           $root = "$env:USERPROFILE\TBuild"
-          New-Item -ItemType Directory $root | Out-Null
+          $volumeRoot = 'D:\TBuild'
+          New-Item -ItemType Directory $volumeRoot | Out-Null
+          New-Item -ItemType Junction -Path $root -Target $volumeRoot | Out-Null
           New-Item -ItemType Junction -Path "$env:GITHUB_WORKSPACE\TBuild" -Target $root | Out-Null
+          Get-Volume -DriveLetter C, D | Select-Object DriveLetter, SizeRemaining, Size
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
