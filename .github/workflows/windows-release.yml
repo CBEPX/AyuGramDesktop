@@ -30,7 +30,7 @@ jobs:
           New-Item -ItemType Directory $volumeRoot | Out-Null
           New-Item -ItemType Junction -Path $root -Target $volumeRoot | Out-Null
           New-Item -ItemType Junction -Path "$env:GITHUB_WORKSPACE\TBuild" -Target $root | Out-Null
-          Get-Volume -DriveLetter C, D | Select-Object DriveLetter, SizeRemaining, Size
+          Get-Volume -DriveLetter C, D | Select-Object DriveLetter, SizeRemaining, Size | Format-List
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -63,7 +63,7 @@ jobs:
             throw 'MSVC 14.44 ATL/MFC headers are required.'
           }
           "VS_PATH=$vs" >> $env:GITHUB_ENV
-          "TBUILD=$env:GITHUB_WORKSPACE\TBuild" >> $env:GITHUB_ENV
+          "TBUILD=D:\TBuild" >> $env:GITHUB_ENV
           Get-Volume | Select-Object DriveLetter, SizeRemaining, Size
           git config --global user.name 'CI build'
           git config --global user.email 'ci@localhost'
@@ -141,6 +141,7 @@ jobs:
           call configure.bat -G "Ninja Multi-Config" ^
             -D TDESKTOP_API_TEST=ON ^
             -D CMAKE_CONFIGURATION_TYPES:STRING=Release ^
+            -D CMAKE_OBJECT_PATH_MAX:STRING=240 ^
             -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT:STRING= ^
             -D CMAKE_SYSTEM_VERSION=10.0.26100.0 ^
             -D DESKTOP_APP_DISABLE_AUTOUPDATE=OFF
@@ -153,6 +154,7 @@ jobs:
           foreach ($expected in @(
             'CMAKE_GENERATOR:INTERNAL=Ninja Multi-Config',
             'CMAKE_CONFIGURATION_TYPES:STRING=Release',
+            'CMAKE_OBJECT_PATH_MAX:STRING=240',
             'CMAKE_MSVC_DEBUG_INFORMATION_FORMAT:STRING='
           )) {
             if ($cache -notcontains $expected) { throw "Unexpected build configuration: $expected" }
@@ -164,16 +166,34 @@ jobs:
           if ($compiler.Count -ne 1 -or $compiler.Line -notmatch 'Hostx64[/\\]x64[/\\]cl\.exe') {
             throw 'Expected the Hostx64/x64 MSVC compiler.'
           }
-          Get-CimInstance Win32_OperatingSystem | Select-Object TotalVisibleMemorySize, FreePhysicalMemory, TotalVirtualMemorySize, FreeVirtualMemory
-          Get-CimInstance Win32_PageFileUsage | Select-Object Name, AllocatedBaseSize, CurrentUsage, PeakUsage
-          Get-Volume -DriveLetter C, D | Select-Object DriveLetter, SizeRemaining, Size
+          Set-Location $out
+          Write-Output "Build working directory: $((Get-Location).Path)"
+          $targets = & ninja -f build-Release.ninja -t targets all
+          if ($LASTEXITCODE) { throw 'Cannot enumerate Ninja targets.' }
+          $objects = @(foreach ($target in $targets) {
+            if ($target -match '^(.*\.obj): ') {
+              [System.IO.Path]::GetFullPath((Join-Path $out $Matches[1]))
+            }
+          })
+          if (!$objects.Count) { throw 'No object targets found.' }
+          $longest = $objects | Sort-Object Length -Descending | Select-Object -First 1
+          Write-Output "Longest object path ($($longest.Length) characters): $longest"
+          if ($longest.Length -ge 260) { throw "Object path reaches MAX_PATH: $longest" }
+          Get-CimInstance Win32_OperatingSystem | Select-Object TotalVisibleMemorySize, FreePhysicalMemory, TotalVirtualMemorySize, FreeVirtualMemory | Format-List
+          Get-CimInstance Win32_PageFileUsage | Select-Object Name, AllocatedBaseSize, CurrentUsage, PeakUsage | Format-List
+          Get-Volume -DriveLetter C, D | Select-Object DriveLetter, SizeRemaining, Size | Format-List
 
       - name: Build Release
         shell: cmd
         run: |
           call "%VS_PATH%\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.44 10.0.26100.0
           if errorlevel 1 exit /b %errorlevel%
-          cmake --build "%TBUILD%\tdesktop\out" --config Release --target Telegram --parallel 2
+          cd /d "%TBUILD%\tdesktop\out"
+          if errorlevel 1 exit /b %errorlevel%
+          cd
+          cmake --build . --config Release --target external_qt_static_plugins_kimageformats --parallel 2
+          if errorlevel 1 exit /b %errorlevel%
+          cmake --build . --config Release --target Telegram --parallel 2
           if errorlevel 1 exit /b %errorlevel%
 
       - name: Package application and provenance
