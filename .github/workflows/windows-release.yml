@@ -72,7 +72,7 @@ jobs:
         id: tools
         with:
           path: TBuild/ThirdParty
-          key: windows-2025-msvc1444-py310-tools-${{ hashFiles('TBuild/tdesktop/Telegram/build/prepare/**', 'TBuild/tdesktop/Telegram/build/qt_version.py') }}
+          key: windows-2025-d-drive-v2-msvc1444-py310-tools-${{ hashFiles('TBuild/tdesktop/Telegram/build/prepare/**', 'TBuild/tdesktop/Telegram/build/qt_version.py') }}
 
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         id: libs
@@ -83,7 +83,7 @@ jobs:
             !TBuild/Libraries/win64/cache_keys
             TBuild/Libraries/win64/cache_keys/*
             !TBuild/Libraries/win64/cache_keys/[qQ]t[_-]*
-          key: windows-2025-msvc1444-x64-libs-${{ hashFiles('TBuild/tdesktop/Telegram/build/prepare/**', 'TBuild/tdesktop/Telegram/build/qt_version.py') }}
+          key: windows-2025-d-drive-v2-msvc1444-x64-libs-${{ hashFiles('TBuild/tdesktop/Telegram/build/prepare/**', 'TBuild/tdesktop/Telegram/build/qt_version.py') }}
 
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         id: qt
@@ -91,7 +91,7 @@ jobs:
           path: |
             TBuild/Libraries/win64/[qQ]t[_-]*
             TBuild/Libraries/win64/cache_keys/[qQ]t[_-]*
-          key: windows-2025-msvc1444-x64-qt5-${{ hashFiles('TBuild/tdesktop/Telegram/build/prepare/**', 'TBuild/tdesktop/Telegram/build/qt_version.py') }}
+          key: windows-2025-d-drive-v2-msvc1444-x64-qt5-${{ hashFiles('TBuild/tdesktop/Telegram/build/prepare/**', 'TBuild/tdesktop/Telegram/build/qt_version.py') }}
 
       - name: Prepare dependencies
         shell: cmd
@@ -126,15 +126,54 @@ jobs:
             TBuild/Libraries/win64/cache_keys/[qQ]t[_-]*
           key: ${{ steps.qt.outputs.cache-primary-key }}
 
-      - name: Build Release
+      - name: Configure Release
         shell: cmd
         run: |
           call "%VS_PATH%\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.44 10.0.26100.0
           if errorlevel 1 exit /b %errorlevel%
           cd /d "%TBUILD%\tdesktop\Telegram"
-          call configure.bat x64 -D TDESKTOP_API_TEST=ON -D CMAKE_CONFIGURATION_TYPES=Release -D CMAKE_SYSTEM_VERSION=10.0.26100.0 -D DESKTOP_APP_DISABLE_AUTOUPDATE=OFF
+          echo Host architecture: %VSCMD_ARG_HOST_ARCH%
+          echo Target architecture: %VSCMD_ARG_TGT_ARCH%
+          if /I not "%VSCMD_ARG_HOST_ARCH%"=="x64" exit /b 1
+          if /I not "%VSCMD_ARG_TGT_ARCH%"=="x64" exit /b 1
+          where cl
           if errorlevel 1 exit /b %errorlevel%
-          cmake --build ..\out --config Release --target Telegram --parallel 4
+          call configure.bat -G "Ninja Multi-Config" ^
+            -D TDESKTOP_API_TEST=ON ^
+            -D CMAKE_CONFIGURATION_TYPES:STRING=Release ^
+            -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT:STRING= ^
+            -D CMAKE_SYSTEM_VERSION=10.0.26100.0 ^
+            -D DESKTOP_APP_DISABLE_AUTOUPDATE=OFF
+          if errorlevel 1 exit /b %errorlevel%
+
+      - name: Verify Windows build configuration
+        run: |
+          $out = "$env:TBUILD\tdesktop\out"
+          $cache = Get-Content "$out\CMakeCache.txt"
+          foreach ($expected in @(
+            'CMAKE_GENERATOR:INTERNAL=Ninja Multi-Config',
+            'CMAKE_CONFIGURATION_TYPES:STRING=Release',
+            'CMAKE_MSVC_DEBUG_INFORMATION_FORMAT:STRING='
+          )) {
+            if ($cache -notcontains $expected) { throw "Unexpected build configuration: $expected" }
+            Write-Output $expected
+          }
+          $compiler = Get-ChildItem "$out\CMakeFiles\*\CMakeCXXCompiler.cmake" |
+            Select-String '^set\(CMAKE_CXX_COMPILER "'
+          $compiler | ForEach-Object { Write-Output $_.Line }
+          if ($compiler.Count -ne 1 -or $compiler.Line -notmatch 'Hostx64[/\\]x64[/\\]cl\.exe') {
+            throw 'Expected the Hostx64/x64 MSVC compiler.'
+          }
+          Get-CimInstance Win32_OperatingSystem | Select-Object TotalVisibleMemorySize, FreePhysicalMemory, TotalVirtualMemorySize, FreeVirtualMemory
+          Get-CimInstance Win32_PageFileUsage | Select-Object Name, AllocatedBaseSize, CurrentUsage, PeakUsage
+          Get-Volume -DriveLetter C, D | Select-Object DriveLetter, SizeRemaining, Size
+
+      - name: Build Release
+        shell: cmd
+        run: |
+          call "%VS_PATH%\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.44 10.0.26100.0
+          if errorlevel 1 exit /b %errorlevel%
+          cmake --build "%TBUILD%\tdesktop\out" --config Release --target Telegram --parallel 2
           if errorlevel 1 exit /b %errorlevel%
 
       - name: Package application and provenance
